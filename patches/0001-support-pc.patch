@@ -8,23 +8,30 @@ diff --git a/app/src/main/java/com/atharok/btremote/common/utils/Constants.kt b/
 index 51770bd..03fdb45 100644
 --- a/app/src/main/java/com/atharok/btremote/common/utils/Constants.kt
 +++ b/app/src/main/java/com/atharok/btremote/common/utils/Constants.kt
-@@ -42,3 +42,3 @@ const val DELAY_BETWEEN_KEY_PRESSES_IN_MILLIS = 25L
+@@ -40,13 +40,13 @@ const val DEFAULT_USE_ENTER_FOR_SELECTION: Boolean = false
+ 
+ const val DELAY_BETWEEN_KEY_PRESSES_IN_MILLIS = 25L
  
 -const val USE_MOUSE_NAVIGATION_BY_DEFAULT = false
 +const val USE_MOUSE_NAVIGATION_BY_DEFAULT = true
  
-@@ -47,4 +47,4 @@ const val USE_MOUSE_NAVIGATION_BY_DEFAULT = false
+ // ---- HID Descriptor ----
+ 
  const val KEYBOARD_REPORT_ID = 0x01
 -const val REMOTE_REPORT_ID = 0x02
 -const val MOUSE_REPORT_ID = 0x03
 +const val MOUSE_REPORT_ID = 0x02
 +const val REMOTE_REPORT_ID = 0x03
  
+ val REMOTE_INPUT_NONE = byteArrayOf(0x00, 0x00)
+ 
 diff --git a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
 index 820b81f..2e2ec96 100644
 --- a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
 +++ b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
-@@ -152,2 +152,11 @@ class BluetoothHidCore(
+@@ -150,12 +150,21 @@ class BluetoothHidCore(
+ 
+     // ---- Send Report ----
  
 +    private fun sendAndroidReport(
 +        hidDevice: BluetoothHidDevice,
@@ -36,22 +43,28 @@ index 820b81f..2e2ec96 100644
 +    }
 +
      fun sendReport(id: Int, bytes: ByteArray): Boolean {
-@@ -157,3 +166,3 @@ class BluetoothHidCore(
+         var success = false
+         bluetoothDevice?.let { device ->
+             bluetoothHidDevice?.let { hidDevice ->
                  if (checkBluetoothConnectPermission(context)) {
 -                    success = hidDevice.sendReport(device, id, bytes)
 +                    success = sendAndroidReport(hidDevice, device, id, bytes)
                  }
-@@ -175,3 +184,3 @@ class BluetoothHidCore(
+             }
+         }
+@@ -173,17 +182,17 @@ class BluetoothHidCore(
+                 if (checkBluetoothConnectPermission(context)) {
+                     success = true
                      text.forEach {
 -                        if(!hidDevice.sendReport(device, KEYBOARD_REPORT_ID, virtualKeyboardLayout.getKeyboardKey(it))) {
 +                        if(!sendAndroidReport(hidDevice, device, KEYBOARD_REPORT_ID, virtualKeyboardLayout.getKeyboardKey(it))) {
                              success = false
-@@ -179,3 +188,3 @@ class BluetoothHidCore(
+                         }
                          delay(DELAY_BETWEEN_KEY_PRESSES_IN_MILLIS)
 -                        hidDevice.sendReport(device, KEYBOARD_REPORT_ID, REMOTE_INPUT_NONE)
 +                        sendAndroidReport(hidDevice, device, KEYBOARD_REPORT_ID, REMOTE_INPUT_NONE)
                          delay(DELAY_BETWEEN_KEY_PRESSES_IN_MILLIS)
-@@ -183,5 +192,5 @@ class BluetoothHidCore(
+                     }
                      if(shouldSendEnter) {
 -                        hidDevice.sendReport(device, KEYBOARD_REPORT_ID, RemoteButtonProperties.KeyboardEnterButton.input)
 +                        sendAndroidReport(hidDevice, device, KEYBOARD_REPORT_ID, RemoteButtonProperties.KeyboardEnterButton.input)
@@ -59,3 +72,5 @@ index 820b81f..2e2ec96 100644
 -                        hidDevice.sendReport(device, KEYBOARD_REPORT_ID, REMOTE_INPUT_NONE)
 +                        sendAndroidReport(hidDevice, device, KEYBOARD_REPORT_ID, REMOTE_INPUT_NONE)
                      }
+                 }
+             }

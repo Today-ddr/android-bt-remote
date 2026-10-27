@@ -1,0 +1,626 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 22:58:00 +0800
+Subject: [PATCH] =?UTF-8?q?feat(connection):=20=E6=94=AF=E6=8C=81=E5=90=8E?=
+ =?UTF-8?q?=E5=8F=B0=E4=B8=8E=E6=8C=89=E9=92=AE=E5=AE=8C=E5=85=A8=E6=96=AD?=
+ =?UTF-8?q?=E5=BC=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt b/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt
+index d9e18e5..524917e 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt
+@@ -49,4 +49,9 @@ class AppScopeUseCase(
+     fun setAppForeground(isForeground: Boolean) {
+         bluetoothRepository.setAppForeground(isForeground)
+     }
++
++    suspend fun disconnectCompletely() {
++        dataStoreRepository.saveAutoConnectPaused(true)
++        bluetoothRepository.disconnectDevice()
++    }
+ }
+diff --git a/app/src/main/java/com/atharok/btremote/domain/usecases/DeviceSelectionUseCase.kt b/app/src/main/java/com/atharok/btremote/domain/usecases/DeviceSelectionUseCase.kt
+index cfe0b22..9e49abf 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/usecases/DeviceSelectionUseCase.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/usecases/DeviceSelectionUseCase.kt
+@@ -38,4 +38,8 @@ class DeviceSelectionUseCase(
+     suspend fun saveAutoConnectDeviceAddress(address: String) {
+         dataStoreRepository.saveAutoConnectDeviceAddress(address)
+     }
+-}
+\ No newline at end of file
++
++    suspend fun resumeAutoConnect() {
++        dataStoreRepository.saveAutoConnectPaused(false)
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/usecases/SettingsUseCase.kt b/app/src/main/java/com/atharok/btremote/domain/usecases/SettingsUseCase.kt
+index be5013a..f386855 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/usecases/SettingsUseCase.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/usecases/SettingsUseCase.kt
+@@ -4,6 +4,7 @@ import com.atharok.btremote.domain.entities.RemoteNavigationEntity
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
++import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
+ import com.atharok.btremote.domain.repositories.DataStoreRepository
+@@ -37,6 +38,13 @@ class SettingsUseCase(private val dataStoreRepository: DataStoreRepository) {
+     val remoteSettingsFlow: Flow<RemoteSettings>
+         get() = dataStoreRepository.remoteSettingsFlow
+ 
++    val connectionSettingsFlow: Flow<ConnectionSettings> =
++        dataStoreRepository.connectionSettingsFlow
++
++    suspend fun saveDisconnectOnBackground(enabled: Boolean) {
++        dataStoreRepository.saveDisconnectOnBackground(enabled)
++    }
++
+     suspend fun saveMouseSpeed(mouseSpeed: Float) {
+         dataStoreRepository.saveMouseSpeed(mouseSpeed)
+     }
+@@ -104,4 +112,4 @@ class SettingsUseCase(private val dataStoreRepository: DataStoreRepository) {
+     suspend fun saveHideBluetoothActivationButton(hide: Boolean) {
+         dataStoreRepository.saveHideBluetoothActivationButton(hide)
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt
+index 05ecca6..35777e5 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt
+@@ -1,12 +1,14 @@
+ package com.atharok.btremote.presentation.viewmodel
+ 
+ import androidx.lifecycle.ViewModel
++import androidx.lifecycle.viewModelScope
+ import com.atharok.btremote.domain.entities.DeviceHidConnectionState
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
+ import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.usecases.AppScopeUseCase
+ import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.launch
+ 
+ class AppScopeViewModel(
+     private val useCase: AppScopeUseCase
+@@ -42,4 +44,11 @@ class AppScopeViewModel(
+     fun onAppBackground() {
+         useCase.setAppForeground(false)
+     }
++
++    fun disconnectCompletely(onComplete: () -> Unit = {}) {
++        viewModelScope.launch {
++            useCase.disconnectCompletely()
++            onComplete()
++        }
++    }
+ }
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/DeviceSelectionViewModel.kt b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/DeviceSelectionViewModel.kt
+index 7b92e30..87ecffa 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/DeviceSelectionViewModel.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/DeviceSelectionViewModel.kt
+@@ -58,5 +58,12 @@ class DeviceSelectionViewModel(
+     fun getAutoConnectDeviceAddressFlow(): Flow<String> = useCase.getAutoConnectDeviceAddressFlow()
+     fun saveAutoConnectDeviceAddress(address: String) = viewModelScope.launch {
+         useCase.saveAutoConnectDeviceAddress(address)
++        if (address.isNotBlank()) {
++            useCase.resumeAutoConnect()
++        }
++    }
++
++    fun resumeAutoConnect() = viewModelScope.launch {
++        useCase.resumeAutoConnect()
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/SettingsViewModel.kt b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/SettingsViewModel.kt
+index ae60a71..cb9739d 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/SettingsViewModel.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/SettingsViewModel.kt
+@@ -6,6 +6,7 @@ import com.atharok.btremote.domain.entities.RemoteNavigationEntity
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
++import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
+ import com.atharok.btremote.domain.usecases.SettingsUseCase
+@@ -40,6 +41,13 @@ class SettingsViewModel(
+ 
+     val remoteSettingsFlow: Flow<RemoteSettings> = useCase.remoteSettingsFlow
+ 
++    val connectionSettingsFlow: Flow<ConnectionSettings> =
++        useCase.connectionSettingsFlow
++
++    fun saveDisconnectOnBackground(enabled: Boolean) = viewModelScope.launch {
++        useCase.saveDisconnectOnBackground(enabled)
++    }
++
+     fun saveMouseSpeed(mouseSpeed: Float) = viewModelScope.launch {
+         useCase.saveMouseSpeed(mouseSpeed)
+     }
+@@ -107,4 +115,4 @@ class SettingsViewModel(
+     fun saveHideBluetoothActivationButton(hide: Boolean) = viewModelScope.launch {
+         useCase.saveHideBluetoothActivationButton(hide)
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt b/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
+index 13c4a66..ebc91c4 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
+@@ -14,6 +14,7 @@ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberUpdatedState
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.platform.LocalContext
+@@ -25,8 +26,10 @@ import com.atharok.btremote.common.extensions.getActivity
+ import com.atharok.btremote.common.utils.arePermissionsGranted
+ import com.atharok.btremote.common.utils.bluetoothConnectPermissions
+ import com.atharok.btremote.common.utils.bluetoothScanPermissions
++import com.atharok.btremote.domain.connection.ConnectionPolicy
+ import com.atharok.btremote.domain.entities.DeviceHidConnectionState
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
++import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.presentation.services.BluetoothHidService
+ import com.atharok.btremote.presentation.viewmodel.AppScopeViewModel
+ import com.atharok.btremote.ui.components.CheckBluetoothStateChanged
+@@ -58,6 +61,14 @@ fun BtRemoteApp(
+ ) {
+     val appearance by appScopeViewModel.appearanceSettingsFlow
+         .collectAsStateWithLifecycle(AppearanceSettings())
++    val connectionSettings: ConnectionSettings? by appScopeViewModel.connectionSettingsFlow
++        .collectAsStateWithLifecycle(initialValue = null)
++    val isBluetoothServiceRunning: Boolean by appScopeViewModel.isBluetoothServiceRunning
++        .collectAsStateWithLifecycle()
++    val disconnectOnBackgroundState = rememberUpdatedState(
++        connectionSettings?.disconnectOnBackground ?: true
++    )
++    val serviceRunningState = rememberUpdatedState(isBluetoothServiceRunning)
+ 
+     BtRemoteTheme(
+         appearance = appearance
+@@ -70,7 +81,6 @@ fun BtRemoteApp(
+                 BluetoothNotSupportScreen()
+             } else {
+ 
+-                val isBluetoothServiceRunning: Boolean by appScopeViewModel.isBluetoothServiceRunning.collectAsStateWithLifecycle()
+                 val isBluetoothHidProfileRegistered: Boolean by appScopeViewModel.isBluetoothHidProfileRegistered.collectAsStateWithLifecycle()
+                 val bluetoothDeviceHidConnectionState: DeviceHidConnectionState by appScopeViewModel.deviceHidConnectionState.collectAsStateWithLifecycle()
+ 
+@@ -103,6 +113,12 @@ fun BtRemoteApp(
+                     }
+                 }
+ 
++                val disconnectCompletely = {
++                    appScopeViewModel.disconnectCompletely {
++                        BluetoothHidService.stop(context)
++                    }
++                }
++
+                 // ---- NavHost ----
+ 
+                 AppNavHost(
+@@ -168,6 +184,7 @@ fun BtRemoteApp(
+                             isBluetoothServiceRunning = isBluetoothServiceRunning,
+                             isBluetoothHidProfileRegistered = isBluetoothHidProfileRegistered,
+                             bluetoothDeviceHidConnectionState = bluetoothDeviceHidConnectionState,
++                            connectionSettings = connectionSettings,
+                             closeApp = { context.getActivity()?.moveTaskToBack(true) },
+                             navigateToRemoteScreen = {
+                                 navController.navigateTo(AppNavDestination.RemoteDestination.route)
+@@ -179,6 +196,10 @@ fun BtRemoteApp(
+                                 navController.navigateTo(AppNavDestination.DistantDevicePairDestination.route)
+                             },
+                             navigateToSettings = navigateToSettings,
++                            disconnectCompletely = disconnectCompletely,
++                            startHidService = { explicitAddress ->
++                                BluetoothHidService.start(context, explicitAddress)
++                            },
+                             modifier = Modifier
+                         )
+                     },
+@@ -216,6 +237,7 @@ fun BtRemoteApp(
+                             bluetoothDeviceHidConnectionState = bluetoothDeviceHidConnectionState,
+                             closeApp = { context.getActivity()?.moveTaskToBack(true) },
+                             navigateToSettings = navigateToSettings,
++                            disconnectCompletely = disconnectCompletely,
+                             modifier = Modifier
+                         )
+                     },
+@@ -225,17 +247,30 @@ fun BtRemoteApp(
+                 // ---- Lifecycle ----
+ 
+                 OnLifecycleEvent { _, event ->
+-                    // If the app goes into the background
+-                    if(event == Lifecycle.Event.ON_STOP) {
+-                        // If we are in the device selection view
+-                        if(navController.currentDestination?.route == AppNavDestination.DeviceSelectionDestination.route) {
+-                            if(isBluetoothServiceRunning) {
+-                                BluetoothHidService.stop(context)
++                    when (event) {
++                        Lifecycle.Event.ON_START -> {
++                            appScopeViewModel.onAppForeground()
++                        }
++
++                        Lifecycle.Event.ON_STOP -> {
++                            appScopeViewModel.onAppBackground()
++                            val action = ConnectionPolicy.onAppBackground(
++                                disconnectOnBackgroundState.value
++                            )
++                            if (action.stopService &&
++                                action.pauseAutoConnect &&
++                                serviceRunningState.value
++                            ) {
++                                appScopeViewModel.disconnectCompletely {
++                                    BluetoothHidService.stop(context)
++                                }
+                             }
+                         }
++
++                        else -> Unit
+                     }
+                 }
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt b/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt
+index 182ba46..a50c31d 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt
+@@ -44,6 +44,7 @@ import com.atharok.btremote.common.utils.AppIcons
+ import com.atharok.btremote.common.utils.isMacAddress
+ import com.atharok.btremote.domain.entities.DeviceEntity
+ import com.atharok.btremote.domain.entities.DeviceHidConnectionState
++import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.presentation.services.BluetoothHidService
+ import com.atharok.btremote.presentation.viewmodel.DeviceSelectionViewModel
+ import com.atharok.btremote.ui.components.AppScaffold
+@@ -72,11 +73,14 @@ fun DevicesSelectionScreen(
+     isBluetoothServiceRunning: Boolean,
+     isBluetoothHidProfileRegistered: Boolean,
+     bluetoothDeviceHidConnectionState: DeviceHidConnectionState,
++    connectionSettings: ConnectionSettings?,
+     closeApp: () -> Unit,
+     navigateToRemoteScreen: (deviceName: String) -> Unit,
+     navigateToDeviceDiscoveryScreen: () -> Unit,
+     navigateToDistantDevicePairScreen: () -> Unit,
+     navigateToSettings: () -> Unit,
++    disconnectCompletely: () -> Unit,
++    startHidService: (String?) -> Unit,
+     modifier: Modifier = Modifier,
+     viewModel: DeviceSelectionViewModel = koinViewModel(),
+     context: Context = LocalContext.current
+@@ -92,13 +96,18 @@ fun DevicesSelectionScreen(
+     var showHelpBottomSheet: Boolean by remember { mutableStateOf(false) }
+     var deviceToAutoConnect: InternalDevice? by remember { mutableStateOf(null) }
+     var deviceToUnpair: InternalDevice? by remember { mutableStateOf(null) }
++    var autoStartAllowed by remember { mutableStateOf(true) }
+ 
+     BackHandler(enabled = true, onBack = closeApp)
+ 
+-    // If the service isn't started and Bluetooth is enabled, we start the service.
+-    LaunchedEffect(isBluetoothServiceRunning) {
+-        if(!isBluetoothServiceRunning && isBluetoothEnabled) {
+-            BluetoothHidService.start(context)
++    LaunchedEffect(isBluetoothServiceRunning, connectionSettings, autoStartAllowed) {
++        val settings = connectionSettings ?: return@LaunchedEffect
++        if (autoStartAllowed &&
++            !isBluetoothServiceRunning &&
++            isBluetoothEnabled &&
++            !settings.autoConnectPaused
++        ) {
++            startHidService(null)
+         }
+     }
+ 
+@@ -117,12 +126,12 @@ fun DevicesSelectionScreen(
+     StatelessDevicesSelectionScreen(
+         snackbarHostState = snackbarHostState,
+         isBluetoothServiceRunning = isBluetoothServiceRunning,
++        isConnectionPaused = connectionSettings?.autoConnectPaused == true,
+ 
+-        connectDevice = {
+-            if(!viewModel.connectDevice(macAddress = it)) {
+-                viewModel.disconnectDevice()
+-                viewModel.connectDevice(macAddress = it)
+-            }
++        connectDevice = { macAddress ->
++            autoStartAllowed = true
++            viewModel.resumeAutoConnect()
++            startHidService(macAddress)
+         },
+         favoriteDevices = devices.filter { it.macAddress in favoriteDevices },
+         nonFavoriteDevices = devices.filter { it.macAddress !in favoriteDevices },
+@@ -136,6 +145,10 @@ fun DevicesSelectionScreen(
+         autoConnectDeviceAddress = autoConnectDeviceAddress,
+         onDeviceToAutoConnectChanged = { deviceToAutoConnect = it },
+         onDeviceToUnpairChanged = { deviceToUnpair = it },
++        disconnectCompletely = {
++            autoStartAllowed = false
++            disconnectCompletely()
++        },
+ 
+         topBarActions = {
+             TopBarActions(
+@@ -144,7 +157,11 @@ fun DevicesSelectionScreen(
+                 navigateToSettings = navigateToSettings,
+                 onShowBluetoothAddressDialogChanged = { showBluetoothAddressDialog = it },
+                 showHelpBottomSheet = showHelpBottomSheet,
+-                onShowHelpBottomSheetChanged = { showHelpBottomSheet = it }
++                onShowHelpBottomSheetChanged = { showHelpBottomSheet = it },
++                disconnectCompletely = {
++                    autoStartAllowed = false
++                    disconnectCompletely()
++                }
+             )
+         },
+ 
+@@ -156,6 +173,7 @@ fun DevicesSelectionScreen(
+                         confirmButtonText = stringResource(id = R.string.retry),
+                         dismissButtonText = stringResource(id = R.string.close),
+                         onConfirmation = {
++                            autoStartAllowed = true
+                             BluetoothHidService.stop(context) // isBluetoothServiceRunning becomes false, so the service will be restarted via LaunchedEffect(isBluetoothServiceRunning)
+                         },
+                         onDismissRequest = closeApp,
+@@ -182,7 +200,9 @@ fun DevicesSelectionScreen(
+                     BluetoothAddressDialog(
+                         connectDevice = {
+                             showBluetoothAddressDialog = false
+-                            viewModel.connectDevice(it)
++                            autoStartAllowed = true
++                            viewModel.resumeAutoConnect()
++                            startHidService(it)
+                         },
+                         close = {
+                             showBluetoothAddressDialog = false
+@@ -227,6 +247,7 @@ fun DevicesSelectionScreen(
+ private fun StatelessDevicesSelectionScreen(
+     snackbarHostState: SnackbarHostState,
+     isBluetoothServiceRunning: Boolean,
++    isConnectionPaused: Boolean,
+ 
+     connectDevice: (String) -> Unit,
+     favoriteDevices: List<DeviceEntity>,
+@@ -235,6 +256,7 @@ private fun StatelessDevicesSelectionScreen(
+     autoConnectDeviceAddress: String,
+     onDeviceToAutoConnectChanged: (InternalDevice) -> Unit,
+     onDeviceToUnpairChanged: (InternalDevice) -> Unit,
++    disconnectCompletely: () -> Unit,
+ 
+     topBarActions: @Composable (RowScope.() -> Unit),
+     overlayView: @Composable () -> Unit,
+@@ -258,6 +280,7 @@ private fun StatelessDevicesSelectionScreen(
+             saveFavoriteDevice = saveFavoriteDevice,
+             unpairDevice = onDeviceToUnpairChanged,
+             isBluetoothServiceRunning = isBluetoothServiceRunning,
++            isConnectionPaused = isConnectionPaused,
+             modifier = Modifier,
+             contentPadding = innerPadding
+         )
+@@ -277,6 +300,7 @@ private fun DevicesListView(
+     saveFavoriteDevice: (String) -> Unit,
+     unpairDevice: (InternalDevice) -> Unit,
+     isBluetoothServiceRunning: Boolean,
++    isConnectionPaused: Boolean,
+     modifier: Modifier = Modifier,
+     contentPadding: PaddingValues = PaddingValues(0.dp)
+ ) {
+@@ -287,6 +311,7 @@ private fun DevicesListView(
+         item {
+             InfoView(
+                 isBluetoothServiceRunning = isBluetoothServiceRunning,
++                isConnectionPaused = isConnectionPaused,
+                 modifier = Modifier.padding(
+                     horizontal = dimensionResource(R.dimen.padding_max),
+                     vertical = dimensionResource(R.dimen.padding_large)
+@@ -381,6 +406,7 @@ private fun DevicesListView(
+ @Composable
+ private fun InfoView(
+     isBluetoothServiceRunning: Boolean,
++    isConnectionPaused: Boolean,
+     modifier: Modifier = Modifier
+ ) {
+     DefaultElevatedCard(modifier = modifier) {
+@@ -407,13 +433,24 @@ private fun InfoView(
+                     maxLines = 1
+                 )
+             }
+-            if(!isBluetoothServiceRunning) {
+-                TextNormalSecondary(
+-                    text = stringResource(R.string.help_info_hid_service_not_initialized_message),
+-                    color = MaterialTheme.colorScheme.error
+-                )
+-            } else {
+-                TextNormalSecondary(text = stringResource(R.string.help_info_message))
++            when {
++                isConnectionPaused -> {
++                    TextNormalSecondary(
++                        text = stringResource(R.string.connection_paused_info),
++                        color = MaterialTheme.colorScheme.secondary
++                    )
++                }
++
++                !isBluetoothServiceRunning -> {
++                    TextNormalSecondary(
++                        text = stringResource(R.string.help_info_hid_service_not_initialized_message),
++                        color = MaterialTheme.colorScheme.error
++                    )
++                }
++
++                else -> {
++                    TextNormalSecondary(text = stringResource(R.string.help_info_message))
++                }
+             }
+         }
+     }
+@@ -427,6 +464,7 @@ private fun TopBarActions(
+     onShowBluetoothAddressDialogChanged: (Boolean) -> Unit,
+     showHelpBottomSheet: Boolean,
+     onShowHelpBottomSheetChanged: (Boolean) -> Unit,
++    disconnectCompletely: () -> Unit,
+ ) {
+     BasicOverflowMenu(
+         icon = AppIcons.BluetoothPairing,
+@@ -462,6 +500,15 @@ private fun TopBarActions(
+                 onShowBluetoothAddressDialogChanged(true)
+             }
+         )
++
++        BasicDropdownMenuItem(
++            text = stringResource(id = R.string.disconnect_completely),
++            icon = AppIcons.Disconnect,
++            onClick = {
++                closeDropdownMenu()
++                disconnectCompletely()
++            }
++        )
+     }
+ 
+     HelpIconButton(onClick = { onShowHelpBottomSheetChanged(!showHelpBottomSheet) })
+@@ -578,4 +625,4 @@ private fun AutoConnectDeviceDialog(
+         dialogTitle = deviceName,
+         dialogText = stringResource(messageRes)
+     )
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/screens/RemoteScreen.kt b/app/src/main/java/com/atharok/btremote/ui/screens/RemoteScreen.kt
+index b1cd4e6..6a2b5b5 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/screens/RemoteScreen.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/screens/RemoteScreen.kt
+@@ -79,6 +79,7 @@ fun RemoteScreen(
+     bluetoothDeviceHidConnectionState: DeviceHidConnectionState,
+     closeApp: () -> Unit,
+     navigateToSettings: () -> Unit,
++    disconnectCompletely: () -> Unit,
+     modifier: Modifier = Modifier,
+     remoteViewModel: RemoteViewModel = koinViewModel(),
+     context: Context = LocalContext.current
+@@ -117,6 +118,7 @@ fun RemoteScreen(
+                 disconnectDevice = {
+                     remoteViewModel.disconnectDevice()
+                 },
++                disconnectCompletely = disconnectCompletely,
+                 navigationToggle = navigationToggle,
+                 onNavigationToggleChanged = { navigationToggle = it },
+                 useAdvancedKeyboardIntegrated = remoteSettings.useAdvancedKeyboard && remoteSettings.useAdvancedKeyboardIntegrated,
+@@ -470,6 +472,7 @@ private fun KeyboardModalBottomSheet(
+ private fun TopBarActions(
+     navigateToSettings: () -> Unit,
+     disconnectDevice: () -> Unit,
++    disconnectCompletely: () -> Unit,
+     navigationToggle: NavigationToggle,
+     onNavigationToggleChanged: (NavigationToggle) -> Unit,
+     useAdvancedKeyboardIntegrated: Boolean,
+@@ -557,6 +560,15 @@ private fun TopBarActions(
+             }
+         )
+ 
++        BasicDropdownMenuItem(
++            text = stringResource(id = R.string.disconnect_completely),
++            icon = AppIcons.Disconnect,
++            onClick = {
++                closeDropdownMenu()
++                disconnectCompletely()
++            }
++        )
++
+         // Divider
+         HorizontalDivider(
+             modifier = Modifier
+diff --git a/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt b/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt
+index 0c364ec..8527ba8 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt
+@@ -52,6 +52,7 @@ import com.atharok.btremote.domain.entities.RemoteNavigationEntity
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
++import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
+ import com.atharok.btremote.presentation.viewmodel.SettingsViewModel
+@@ -78,6 +79,9 @@ fun SettingsScreen(
+     val remoteSettings by settingsViewModel
+         .remoteSettingsFlow.collectAsStateWithLifecycle(RemoteSettings())
+ 
++    val connectionSettings by settingsViewModel.connectionSettingsFlow
++        .collectAsStateWithLifecycle(ConnectionSettings())
++
+     // Advanced Options
+     val showRemoteButtonsInNotification: Boolean by settingsViewModel.showRemoteButtonsInNotificationFlow.collectAsStateWithLifecycle(initialValue = false)
+     val hideBluetoothActivationButton: Boolean by settingsViewModel.hideBluetoothActivationButtonFlow.collectAsStateWithLifecycle(initialValue = false)
+@@ -464,6 +468,19 @@ fun SettingsScreen(
+                     )
+             )
+ 
++            SettingsSwitch(
++                primaryText = stringResource(id = R.string.disconnect_on_background),
++                secondaryText = stringResource(id = R.string.disconnect_on_background_info),
++                checked = connectionSettings.disconnectOnBackground,
++                onCheckedChange = { settingsViewModel.saveDisconnectOnBackground(it) },
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .padding(
++                        horizontal = horizontalPadding,
++                        vertical = verticalPadding
++                    )
++            )
++
+             HorizontalDivider(
+                 modifier = Modifier
+                     .fillMaxWidth()
+@@ -762,4 +779,4 @@ private fun SettingsText(
+             modifier = Modifier.fillMaxSize()
+         )
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index 6e6555d..a2319ff 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -200,6 +200,10 @@
+     <string name="use_enter_for_selection_title">使用 Enter 键进行选择</string>
+     <string name="remove_from_favorites">从收藏中移除</string>
+     <string name="hide_bluetooth_activation_button">在应用启动时隐藏蓝牙激活按钮</string>
++    <string name="disconnect_on_background">离开前台时完全断开</string>
++    <string name="disconnect_on_background_info">停止 HID 服务并暂停自动连接，直到你手动选择设备。</string>
++    <string name="disconnect_completely">完全断开并暂停自动连接</string>
++    <string name="connection_paused_info">HID 服务已停止，自动连接已暂停。选择已配对设备即可重新连接。</string>
+     <string name="favorites">收藏</string>
+     <string name="add_to_favorites">添加到收藏</string>
+     <string name="advanced_options">高级选项</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 2b2cb89..3b8c94a 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -135,6 +135,10 @@
+     <string name="advanced_options">Advanced Options</string>
+     <string name="show_remote_buttons_in_notification">Show remote buttons in notification</string>
+     <string name="hide_bluetooth_activation_button">Hide Bluetooth activation button at app startup</string>
++    <string name="disconnect_on_background">Disconnect completely when the app leaves the foreground</string>
++    <string name="disconnect_on_background_info">Stops the HID service and pauses automatic connection until you select a device manually.</string>
++    <string name="disconnect_completely">Disconnect completely and pause auto-connect</string>
++    <string name="connection_paused_info">The HID service is stopped and automatic connection is paused. Select a paired device to reconnect.</string>
+     <string name="about">About</string>
+     <string name="language">Language</string>
+     <string name="third_party_library">Third-party libraries</string>

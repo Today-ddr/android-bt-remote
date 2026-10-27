@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 22:44:14 +0800
+Subject: [PATCH] =?UTF-8?q?feat(connection):=20=E5=BB=BA=E7=AB=8B=E5=89=8D?=
+ =?UTF-8?q?=E5=90=8E=E5=8F=B0=E8=BF=9E=E6=8E=A5=E7=AD=96=E7=95=A5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/connection/ConnectionPolicy.kt b/app/src/main/java/com/atharok/btremote/domain/connection/ConnectionPolicy.kt
+new file mode 100644
+index 0000000..1918198
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/connection/ConnectionPolicy.kt
+@@ -0,0 +1,15 @@
++package com.atharok.btremote.domain.connection
++
++data class BackgroundConnectionAction(
++    val stopService: Boolean,
++    val pauseAutoConnect: Boolean
++)
++
++object ConnectionPolicy {
++
++    fun onAppBackground(disconnectOnBackground: Boolean): BackgroundConnectionAction =
++        BackgroundConnectionAction(
++            stopService = disconnectOnBackground,
++            pauseAutoConnect = disconnectOnBackground
++        )
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/connection/ConnectionPolicyTest.kt b/app/src/test/java/com/atharok/btremote/domain/connection/ConnectionPolicyTest.kt
+new file mode 100644
+index 0000000..a79c70b
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/connection/ConnectionPolicyTest.kt
+@@ -0,0 +1,24 @@
++package com.atharok.btremote.domain.connection
++
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++class ConnectionPolicyTest {
++
++    @Test
++    fun backgroundWithDisconnectEnabledStopsServiceAndPausesAutoConnect() {
++        assertEquals(
++            BackgroundConnectionAction(stopService = true, pauseAutoConnect = true),
++            ConnectionPolicy.onAppBackground(disconnectOnBackground = true)
++        )
++    }
++
++    @Test
++    fun backgroundWithDisconnectDisabledKeepsService() {
++        assertEquals(
++            BackgroundConnectionAction(stopService = false, pauseAutoConnect = false),
++            ConnectionPolicy.onAppBackground(disconnectOnBackground = false)
++        )
++    }
++
++}

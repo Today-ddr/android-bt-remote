@@ -1,0 +1,282 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 22:51:30 +0800
+Subject: [PATCH] =?UTF-8?q?fix(connection):=20=E7=A6=81=E6=AD=A2=E5=90=8E?=
+ =?UTF-8?q?=E5=8F=B0=E8=87=AA=E5=8A=A8=E8=BF=9E=E6=8E=A5=E4=B8=8E=E7=B2=98?=
+ =?UTF-8?q?=E6=80=A7=E9=87=8D=E5=90=AF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+index 2e2ec96..5965728 100644
+--- a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
++++ b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+@@ -36,10 +36,29 @@ class BluetoothHidCore(
+ 
+     private var autoConnectDeviceAddress: String = ""
+ 
++    @Volatile
++    private var isAppForeground: Boolean = true
++
+     // ---- HID Profile ----
+ 
++    fun setAppForeground(isForeground: Boolean) {
++        isAppForeground = isForeground
++    }
++
+     fun startBluetoothHidProfile(autoConnectDeviceAddress: String) {
+         this.autoConnectDeviceAddress = autoConnectDeviceAddress
++
++        val existingHidDevice = bluetoothHidDevice
++        if (existingHidDevice != null) {
++            if (_isBluetoothHidProfileRegistered.value &&
++                isAppForeground &&
++                isMacAddress(autoConnectDeviceAddress)
++            ) {
++                connectDevice(existingHidDevice, autoConnectDeviceAddress)
++            }
++            return
++        }
++
+         adapter?.getProfileProxy(context, serviceListener, BluetoothProfile.HID_DEVICE)
+     }
+ 
+@@ -52,6 +71,7 @@ class BluetoothHidCore(
+             adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, hidDevice)
+         }
+         bluetoothHidDevice = null
++        autoConnectDeviceAddress = ""
+         _deviceHidConnectionState.value = DeviceHidConnectionState()
+         _isBluetoothServiceRunning.value = false
+     }
+@@ -81,7 +101,10 @@ class BluetoothHidCore(
+         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
+             super.onAppStatusChanged(pluggedDevice, registered)
+             _isBluetoothHidProfileRegistered.value = registered
+-            if(registered && isMacAddress(autoConnectDeviceAddress)) {
++            if (registered &&
++                isAppForeground &&
++                isMacAddress(autoConnectDeviceAddress)
++            ) {
+                 connectDevice(autoConnectDeviceAddress)
+             }
+         }
+@@ -199,4 +222,4 @@ class BluetoothHidCore(
+         }
+         return success
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/data/repositories/BluetoothRepositoryImpl.kt b/app/src/main/java/com/atharok/btremote/data/repositories/BluetoothRepositoryImpl.kt
+index 040da03..b8da4be 100644
+--- a/app/src/main/java/com/atharok/btremote/data/repositories/BluetoothRepositoryImpl.kt
++++ b/app/src/main/java/com/atharok/btremote/data/repositories/BluetoothRepositoryImpl.kt
+@@ -55,6 +55,10 @@ class BluetoothRepositoryImpl(
+         bluetoothHidCore.startBluetoothHidProfile(autoConnectDeviceAddress)
+     }
+ 
++    override fun setAppForeground(isForeground: Boolean) {
++        bluetoothHidCore.setAppForeground(isForeground)
++    }
++
+     override fun stopHidProfile() {
+         bluetoothHidCore.stopBluetoothHidProfile()
+     }
+@@ -90,4 +94,4 @@ class BluetoothRepositoryImpl(
+     ): Boolean {
+         return bluetoothHidCore.sendTextReport(text, virtualKeyboardLayout, shouldSendEnter)
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/repositories/BluetoothRepository.kt b/app/src/main/java/com/atharok/btremote/domain/repositories/BluetoothRepository.kt
+index f510e0f..55ee40b 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/repositories/BluetoothRepository.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/repositories/BluetoothRepository.kt
+@@ -32,6 +32,8 @@ interface BluetoothRepository {
+ 
+     fun startHidProfile(autoConnectDeviceAddress: String)
+ 
++    fun setAppForeground(isForeground: Boolean)
++
+     fun stopHidProfile()
+ 
+     fun isBluetoothServiceRunning(): StateFlow<Boolean>
+@@ -51,4 +53,4 @@ interface BluetoothRepository {
+         virtualKeyboardLayout: VirtualKeyboardLayout,
+         shouldSendEnter: Boolean
+     ): Boolean
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt b/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt
+index 97c0f12..d9e18e5 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt
+@@ -45,4 +45,8 @@ class AppScopeUseCase(
+     fun getDeviceHidConnectionState(): StateFlow<DeviceHidConnectionState> {
+         return bluetoothRepository.getDeviceHidConnectionState()
+     }
+-}
+\ No newline at end of file
++
++    fun setAppForeground(isForeground: Boolean) {
++        bluetoothRepository.setAppForeground(isForeground)
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/usecases/BluetoothHidServiceUseCase.kt b/app/src/main/java/com/atharok/btremote/domain/usecases/BluetoothHidServiceUseCase.kt
+index ce986fa..d9f302e 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/usecases/BluetoothHidServiceUseCase.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/usecases/BluetoothHidServiceUseCase.kt
+@@ -14,29 +14,27 @@ class BluetoothHidServiceUseCase(
+     private val dataStoreRepository: DataStoreRepository
+ ) {
+ 
+-    fun startHidProfile() {
+-        val autoConnectDeviceAddress: String
+-        runBlocking {
+-            autoConnectDeviceAddress = dataStoreRepository.getAutoConnectDeviceAddressFlow().first()
++    fun startHidProfile(explicitConnectAddress: String?) {
++        val settings = runBlocking {
++            dataStoreRepository.connectionSettingsFlow.first()
+         }
+-        bluetoothRepository.startHidProfile(autoConnectDeviceAddress)
++        bluetoothRepository.startHidProfile(
++            settings.autoConnectAddressForStart(explicitConnectAddress)
++        )
+     }
+ 
+     fun stopHidProfile() {
+         bluetoothRepository.stopHidProfile()
+     }
+ 
+-    fun disconnectDevice(): Boolean {
+-        return bluetoothRepository.disconnectDevice()
+-    }
++    fun disconnectDevice(): Boolean =
++        bluetoothRepository.disconnectDevice()
+ 
+-    fun getDeviceHidConnectionState(): StateFlow<DeviceHidConnectionState> {
+-        return bluetoothRepository.getDeviceHidConnectionState()
+-    }
++    fun getDeviceHidConnectionState(): StateFlow<DeviceHidConnectionState> =
++        bluetoothRepository.getDeviceHidConnectionState()
+ 
+-    fun sendRemoteReport(bytes: ByteArray): Boolean {
+-        return bluetoothRepository.sendReport(REMOTE_REPORT_ID, bytes)
+-    }
++    fun sendRemoteReport(bytes: ByteArray): Boolean =
++        bluetoothRepository.sendReport(REMOTE_REPORT_ID, bytes)
+ 
+     fun showRemoteButtonsInNotification(): Flow<Boolean> = dataStoreRepository.showRemoteButtonsInNotification()
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/services/BluetoothHidService.kt b/app/src/main/java/com/atharok/btremote/presentation/services/BluetoothHidService.kt
+index 7649c06..ae6e91d 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/services/BluetoothHidService.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/services/BluetoothHidService.kt
+@@ -76,6 +76,7 @@ class BluetoothHidService : Service() {
+     }
+ 
+     override fun onDestroy() {
++        stopForeground(STOP_FOREGROUND_REMOVE)
+         stopBluetoothHidProfile()
+         super.onDestroy()
+     }
+@@ -90,12 +91,14 @@ class BluetoothHidService : Service() {
+     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+         try {
+             startForeground(NOTIFICATION_ID, createNotification())
+-            startBluetoothHidProfile()
++            startBluetoothHidProfile(
++                intent?.getStringExtra(EXTRA_CONNECT_ADDRESS)
++            )
+         } catch (exception: Exception) {
+             stopSelf()
+         }
+ 
+-        return super.onStartCommand(intent, flags, startId)
++        return START_NOT_STICKY
+     }
+ 
+     // ---- Notification ----
+@@ -204,8 +207,8 @@ class BluetoothHidService : Service() {
+ 
+     // ---- Bluetooth HID Profile ----
+ 
+-    private fun startBluetoothHidProfile() {
+-        useCase.startHidProfile()
++    private fun startBluetoothHidProfile(explicitConnectAddress: String?) {
++        useCase.startHidProfile(explicitConnectAddress)
+     }
+ 
+     private fun stopBluetoothHidProfile() {
+@@ -215,8 +218,12 @@ class BluetoothHidService : Service() {
+     }
+ 
+     companion object {
+-        fun start(context: Context) {
+-            val serviceIntent = Intent(context, BluetoothHidService::class.java)
++        private const val EXTRA_CONNECT_ADDRESS = "extra_connect_address"
++
++        fun start(context: Context, explicitConnectAddress: String? = null) {
++            val serviceIntent = Intent(context, BluetoothHidService::class.java).apply {
++                putExtra(EXTRA_CONNECT_ADDRESS, explicitConnectAddress)
++            }
+             context.startForegroundService(serviceIntent)
+         }
+ 
+@@ -225,4 +232,4 @@ class BluetoothHidService : Service() {
+             context.stopService(serviceIntent)
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt
+index e56e555..05ecca6 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt
+@@ -34,4 +34,12 @@ class AppScopeViewModel(
+     val isBluetoothHidProfileRegistered: StateFlow<Boolean> get() = useCase.isBluetoothHidProfileRegistered()
+ 
+     val deviceHidConnectionState: StateFlow<DeviceHidConnectionState> get() = useCase.getDeviceHidConnectionState()
+-}
+\ No newline at end of file
++
++    fun onAppForeground() {
++        useCase.setAppForeground(true)
++    }
++
++    fun onAppBackground() {
++        useCase.setAppForeground(false)
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/settings/ConnectionSettingsTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/settings/ConnectionSettingsTest.kt
+index 7a945f9..3f5b2c9 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/settings/ConnectionSettingsTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/settings/ConnectionSettingsTest.kt
+@@ -53,6 +53,19 @@ class ConnectionSettingsTest {
+         )
+     }
+ 
++    @Test
++    fun pausedAddressCanStillBeOverriddenByExplicitDeviceTap() {
++        val settings = ConnectionSettings(
++            autoConnectDeviceAddress = "AA:BB:CC:DD:EE:FF",
++            autoConnectPaused = true
++        )
++
++        assertEquals(
++            "11:22:33:44:55:66",
++            settings.autoConnectAddressForStart("11:22:33:44:55:66")
++        )
++    }
++
+     @Test
+     fun unpausedAutoConnectUsesSavedAddress() {
+         val settings = ConnectionSettings(

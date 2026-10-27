@@ -1,0 +1,279 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 23:04:45 +0800
+Subject: [PATCH] =?UTF-8?q?fix(keyboard):=20=E5=8C=BA=E5=88=86=E6=99=AE?=
+ =?UTF-8?q?=E9=80=9A=E9=94=AE=E4=B8=8E=E4=BF=AE=E9=A5=B0=E9=94=AE=E5=B9=B6?=
+ =?UTF-8?q?=E5=A2=9E=E5=8A=A0=E5=A4=A7=E5=86=99=E9=94=81=E5=AE=9A?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt
+index 35ff966..2f6cdaa 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt
+@@ -7,13 +7,21 @@ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.Dp
+ import com.atharok.btremote.domain.entities.remoteInput.RemoteButtonProperties
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
+ import com.atharok.btremote.ui.components.customButtons.CharacterKeyboardKey
+ import com.atharok.btremote.ui.components.customButtons.IconSurfaceButton
+ import com.atharok.btremote.ui.components.customButtons.TextKeyboardKey
+ 
++enum class AdvancedKeyBehavior {
++    KEY,
++    MODIFIER,
++    CAPS_LOCK
++}
++
+ sealed class AdvancedKeyboardKey {
+     abstract val byte: Byte
+     abstract val weight: Float
++    abstract val behavior: AdvancedKeyBehavior
+ 
+     @Composable
+     abstract fun KeyboardKeyView(
+@@ -33,6 +41,8 @@ data class CharacterAdvancedKeyboardKey(
+     val textTertiary: String? = null
+ ): AdvancedKeyboardKey() {
+ 
++    override val behavior: AdvancedKeyBehavior = AdvancedKeyBehavior.KEY
++
+     @Composable
+     override fun KeyboardKeyView(
+         touchDown: (Byte) -> Unit,
+@@ -58,7 +68,8 @@ data class TextAdvancedKeyboardKey(
+     override val byte: Byte,
+     override val weight: Float,
+     val text: String,
+-    val textAlign: TextAlign = TextAlign.Center
++    val textAlign: TextAlign = TextAlign.Center,
++    override val behavior: AdvancedKeyBehavior = AdvancedKeyBehavior.KEY
+ ): AdvancedKeyboardKey() {
+ 
+     @Composable
+@@ -81,12 +92,41 @@ data class TextAdvancedKeyboardKey(
+     }
+ }
+ 
++data class CapsLockAdvancedKeyboardKey(
++    override val weight: Float,
++    val text: String
++) : AdvancedKeyboardKey() {
++
++    override val byte: Byte = KeyboardKey.KEY_CAPS_LOCK.byte
++    override val behavior: AdvancedKeyBehavior = AdvancedKeyBehavior.CAPS_LOCK
++
++    @Composable
++    override fun KeyboardKeyView(
++        touchDown: (Byte) -> Unit,
++        touchUp: (Byte) -> Unit,
++        modifier: Modifier,
++        shape: Shape,
++        elevation: Dp
++    ) {
++        TextKeyboardKey(
++            text = text,
++            touchDown = { touchDown(byte) },
++            touchUp = {},
++            modifier = modifier,
++            shape = shape,
++            elevation = elevation,
++            textAlign = TextAlign.Start
++        )
++    }
++}
++
+ data class IconAdvancedKeyboardKey(
+     val properties: RemoteButtonProperties,
+     override val weight: Float
+ ): AdvancedKeyboardKey() {
+ 
+     override val byte: Byte = properties.input[1]
++    override val behavior: AdvancedKeyBehavior = AdvancedKeyBehavior.KEY
+ 
+     @Composable
+     override fun KeyboardKeyView(
+@@ -109,4 +149,4 @@ data class IconAdvancedKeyboardKey(
+             iconFillFraction = 0.4f
+         )
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardLayout.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardLayout.kt
+index eade3f4..7639c03 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardLayout.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardLayout.kt
+@@ -112,19 +112,25 @@ abstract class AdvancedKeyboardLayout(protected val context: Context) {
+                 )
+             ),
+ 
+-            // LShift, LMeta, Arrow Left, Arrow Down, Arrow Right, RMeta, RShift
++            // Caps Lock, LShift, LMeta, Arrow Left, Arrow Down, Arrow Right, RMeta, RShift
+             arrayOf(
++                CapsLockAdvancedKeyboardKey(
++                    weight = 1.5f,
++                    text = context.getString(R.string.caps_lock)
++                ),
+                 TextAdvancedKeyboardKey(
+                     byte = KeyboardKey.KEY_SHIFT_LEFT.byte,
+                     weight = 1f,
+                     text = context.getString(R.string.shift),
+-                    textAlign = TextAlign.Start
++                    textAlign = TextAlign.Start,
++                    behavior = AdvancedKeyBehavior.MODIFIER
+                 ),
+                 TextAdvancedKeyboardKey(
+                     byte = KeyboardKey.KEY_META_LEFT.byte,
+                     weight = 1f,
+                     text = context.getString(R.string.meta),
+-                    textAlign = TextAlign.Start
++                    textAlign = TextAlign.Start,
++                    behavior = AdvancedKeyBehavior.MODIFIER
+                 ),
+                 IconAdvancedKeyboardKey(
+                     properties = RemoteButtonProperties.KeyboardLeftButton,
+@@ -142,13 +148,15 @@ abstract class AdvancedKeyboardLayout(protected val context: Context) {
+                     byte = KeyboardKey.KEY_META_RIGHT.byte,
+                     weight = 1f,
+                     text = context.getString(R.string.meta),
+-                    textAlign = TextAlign.End
++                    textAlign = TextAlign.End,
++                    behavior = AdvancedKeyBehavior.MODIFIER
+                 ),
+                 TextAdvancedKeyboardKey(
+                     byte = KeyboardKey.KEY_SHIFT_RIGHT.byte,
+                     weight = 1f,
+                     text = context.getString(R.string.shift),
+-                    textAlign = TextAlign.End
++                    textAlign = TextAlign.End,
++                    behavior = AdvancedKeyBehavior.MODIFIER
+                 )
+             ),
+ 
+@@ -158,13 +166,15 @@ abstract class AdvancedKeyboardLayout(protected val context: Context) {
+                     byte = KeyboardKey.KEY_CTRL_LEFT.byte,
+                     weight = 1f,
+                     text = context.getString(R.string.ctrl),
+-                    textAlign = TextAlign.Start
++                    textAlign = TextAlign.Start,
++                    behavior = AdvancedKeyBehavior.MODIFIER
+                 ),
+                 TextAdvancedKeyboardKey(
+                     byte = KeyboardKey.KEY_ALT.byte,
+                     weight = 1f,
+                     text = context.getString(R.string.alt),
+-                    textAlign = TextAlign.Center
++                    textAlign = TextAlign.Center,
++                    behavior = AdvancedKeyBehavior.MODIFIER
+                 ),
+                 IconAdvancedKeyboardKey(
+                     properties = RemoteButtonProperties.KeyboardSpaceBarButton,
+@@ -174,15 +184,17 @@ abstract class AdvancedKeyboardLayout(protected val context: Context) {
+                     byte = KeyboardKey.KEY_ALT_GR.byte,
+                     weight = 1f,
+                     text = context.getString(R.string.alt_gr),
+-                    textAlign = TextAlign.Center
++                    textAlign = TextAlign.Center,
++                    behavior = AdvancedKeyBehavior.MODIFIER
+                 ),
+                 TextAdvancedKeyboardKey(
+                     byte = KeyboardKey.KEY_CTRL_RIGHT.byte,
+                     weight = 1f,
+                     text = context.getString(R.string.ctrl),
+-                    textAlign = TextAlign.End
++                    textAlign = TextAlign.End,
++                    behavior = AdvancedKeyBehavior.MODIFIER
+                 )
+             )
+         )
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index a2319ff..fb91170 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -64,6 +64,7 @@
+     <string name="send">发送</string>
+     <string name="enter">Enter</string>
+     <string name="escape">Esc</string>
++    <string name="caps_lock">大写</string>
+     <string name="delete">Delete</string>
+     <string name="pick">选择</string>
+     <string name="up">上</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 3b8c94a..f0b9130 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -173,6 +173,7 @@
+     <string name="send">Send</string>
+     <string name="enter">Enter</string>
+     <string name="escape">Esc</string>
++    <string name="caps_lock">Caps</string>
+     <string name="delete">Delete</string>
+     <string name="keyboard_tab">Tab</string>
+     <string name="space_bar">Space Bar</string>
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKeyTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKeyTest.kt
+new file mode 100644
+index 0000000..6ec24e0
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKeyTest.kt
+@@ -0,0 +1,53 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard
++
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++class AdvancedKeyboardKeyTest {
++
++    @Test
++    fun characterKeysAreOrdinaryKeys() {
++        val key = CharacterAdvancedKeyboardKey(
++            byte = KeyboardKey.ROW_3_KEY_00.byte,
++            weight = 1f,
++            text = "A"
++        )
++
++        assertEquals(AdvancedKeyBehavior.KEY, key.behavior)
++    }
++
++    @Test
++    fun textKeysDefaultToOrdinaryKeys() {
++        val key = TextAdvancedKeyboardKey(
++            byte = KeyboardKey.KEY_F1.byte,
++            weight = 1f,
++            text = "F1"
++        )
++
++        assertEquals(AdvancedKeyBehavior.KEY, key.behavior)
++    }
++
++    @Test
++    fun modifierKeysCanOptIntoModifierBehavior() {
++        val key = TextAdvancedKeyboardKey(
++            byte = KeyboardKey.KEY_SHIFT_LEFT.byte,
++            weight = 1f,
++            text = "Shift",
++            behavior = AdvancedKeyBehavior.MODIFIER
++        )
++
++        assertEquals(AdvancedKeyBehavior.MODIFIER, key.behavior)
++    }
++
++    @Test
++    fun capsLockHasItsOwnBehavior() {
++        val key = CapsLockAdvancedKeyboardKey(
++            weight = 1.5f,
++            text = "Caps"
++        )
++
++        assertEquals(AdvancedKeyBehavior.CAPS_LOCK, key.behavior)
++        assertEquals(KeyboardKey.KEY_CAPS_LOCK.byte, key.byte)
++    }
++}

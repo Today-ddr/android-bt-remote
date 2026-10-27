@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 23:14:38 +0800
+Subject: [PATCH] =?UTF-8?q?fix(connection):=20=E5=8A=A0=E5=9B=BA=E6=89=8B?=
+ =?UTF-8?q?=E5=8A=A8=E5=90=AF=E5=8A=A8=E4=B8=8E=20HID=20=E9=87=8D=E5=85=A5?=
+ =?UTF-8?q?=E4=BF=9D=E6=8A=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+index 5965728..2f593b9 100644
+--- a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
++++ b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+@@ -34,7 +34,10 @@ class BluetoothHidCore(
+     private val _isBluetoothHidProfileRegistered: MutableStateFlow<Boolean> = MutableStateFlow(false)
+     val isBluetoothHidProfileRegistered: StateFlow<Boolean> = _isBluetoothHidProfileRegistered
+ 
++    @Volatile
+     private var autoConnectDeviceAddress: String = ""
++    @Volatile
++    private var isProfileProxyRequestInFlight: Boolean = false
+ 
+     @Volatile
+     private var isAppForeground: Boolean = true
+@@ -54,12 +57,22 @@ class BluetoothHidCore(
+                 isAppForeground &&
+                 isMacAddress(autoConnectDeviceAddress)
+             ) {
+-                connectDevice(existingHidDevice, autoConnectDeviceAddress)
++                if (checkBluetoothConnectPermission(context)) {
++                    connectDevice(existingHidDevice, autoConnectDeviceAddress)
++                }
+             }
+             return
+         }
+ 
+-        adapter?.getProfileProxy(context, serviceListener, BluetoothProfile.HID_DEVICE)
++        if (isProfileProxyRequestInFlight) {
++            return
++        }
++
++        val bluetoothAdapter = adapter ?: return
++        isProfileProxyRequestInFlight = true
++        if (!bluetoothAdapter.getProfileProxy(context, serviceListener, BluetoothProfile.HID_DEVICE)) {
++            isProfileProxyRequestInFlight = false
++        }
+     }
+ 
+     fun stopBluetoothHidProfile() {
+@@ -72,7 +85,9 @@ class BluetoothHidCore(
+         }
+         bluetoothHidDevice = null
+         autoConnectDeviceAddress = ""
++        isProfileProxyRequestInFlight = false
+         _deviceHidConnectionState.value = DeviceHidConnectionState()
++        _isBluetoothHidProfileRegistered.value = false
+         _isBluetoothServiceRunning.value = false
+     }
+ 
+@@ -80,18 +95,27 @@ class BluetoothHidCore(
+ 
+     private val serviceListener = object : ServiceListener {
+         override fun onServiceConnected(i: Int, bluetoothProfile: BluetoothProfile?) {
++            isProfileProxyRequestInFlight = false
+             if(i == BluetoothProfile.HID_DEVICE) {
+-                bluetoothHidDevice = bluetoothProfile as? BluetoothHidDevice?
+-                bluetoothHidDevice?.let { hidDevice ->
++                val hidDevice = bluetoothProfile as? BluetoothHidDevice
++                bluetoothHidDevice = hidDevice
++                _isBluetoothServiceRunning.value = true
++                hidDevice?.let {
+                     if (checkBluetoothConnectPermission(context)) {
+-                        _isBluetoothHidProfileRegistered.value = hidDevice.registerApp(hidSettings, null, null, Runnable::run, callback)
++                        _isBluetoothHidProfileRegistered.value = it.registerApp(hidSettings, null, null, Runnable::run, callback)
+                     }
+                 }
+             }
+-            _isBluetoothServiceRunning.value = true
+         }
+ 
+-        override fun onServiceDisconnected(i: Int) {}
++        override fun onServiceDisconnected(i: Int) {
++            if(i == BluetoothProfile.HID_DEVICE) {
++                isProfileProxyRequestInFlight = false
++                bluetoothHidDevice = null
++                _isBluetoothHidProfileRegistered.value = false
++                _isBluetoothServiceRunning.value = false
++            }
++        }
+     }
+ 
+     // ---- BluetoothHidDevice.Callback implementation ----
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/services/BluetoothHidService.kt b/app/src/main/java/com/atharok/btremote/presentation/services/BluetoothHidService.kt
+index ae6e91d..59e208c 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/services/BluetoothHidService.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/services/BluetoothHidService.kt
+@@ -45,6 +45,7 @@ class BluetoothHidService : Service() {
+     private lateinit var notificationManager: NotificationManager
+     private var job: Job? = null
+     private var currentConnectionState = STATE_DISCONNECTED
++    private var hasHandledStart = false
+ 
+     override fun onCreate() {
+         super.onCreate()
+@@ -89,11 +90,15 @@ class BluetoothHidService : Service() {
+     override fun onBind(intent: Intent?): IBinder = Binder()
+ 
+     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
++        val explicitConnectAddress = intent?.getStringExtra(EXTRA_CONNECT_ADDRESS)
++        if (explicitConnectAddress == null && hasHandledStart) {
++            return START_NOT_STICKY
++        }
++        hasHandledStart = true
++
+         try {
+             startForeground(NOTIFICATION_ID, createNotification())
+-            startBluetoothHidProfile(
+-                intent?.getStringExtra(EXTRA_CONNECT_ADDRESS)
+-            )
++            startBluetoothHidProfile(explicitConnectAddress)
+         } catch (exception: Exception) {
+             stopSelf()
+         }
+diff --git a/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt b/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
+index ebc91c4..6bc8be9 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
+@@ -68,7 +68,6 @@ fun BtRemoteApp(
+     val disconnectOnBackgroundState = rememberUpdatedState(
+         connectionSettings?.disconnectOnBackground ?: true
+     )
+-    val serviceRunningState = rememberUpdatedState(isBluetoothServiceRunning)
+ 
+     BtRemoteTheme(
+         appearance = appearance
+@@ -258,8 +257,7 @@ fun BtRemoteApp(
+                                 disconnectOnBackgroundState.value
+                             )
+                             if (action.stopService &&
+-                                action.pauseAutoConnect &&
+-                                serviceRunningState.value
++                                action.pauseAutoConnect
+                             ) {
+                                 appScopeViewModel.disconnectCompletely {
+                                     BluetoothHidService.stop(context)
+diff --git a/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt b/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt
+index a50c31d..7c0150e 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt
+@@ -145,10 +145,6 @@ fun DevicesSelectionScreen(
+         autoConnectDeviceAddress = autoConnectDeviceAddress,
+         onDeviceToAutoConnectChanged = { deviceToAutoConnect = it },
+         onDeviceToUnpairChanged = { deviceToUnpair = it },
+-        disconnectCompletely = {
+-            autoStartAllowed = false
+-            disconnectCompletely()
+-        },
+ 
+         topBarActions = {
+             TopBarActions(
+@@ -256,7 +252,6 @@ private fun StatelessDevicesSelectionScreen(
+     autoConnectDeviceAddress: String,
+     onDeviceToAutoConnectChanged: (InternalDevice) -> Unit,
+     onDeviceToUnpairChanged: (InternalDevice) -> Unit,
+-    disconnectCompletely: () -> Unit,
+ 
+     topBarActions: @Composable (RowScope.() -> Unit),
+     overlayView: @Composable () -> Unit,

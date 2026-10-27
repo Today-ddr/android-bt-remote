@@ -1,0 +1,242 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 23:01:34 +0800
+Subject: [PATCH] =?UTF-8?q?feat(keyboard):=20=E5=A2=9E=E5=8A=A0=E5=8F=AF?=
+ =?UTF-8?q?=E9=87=8A=E6=94=BE=E7=9A=84=E9=94=AE=E7=9B=98=E6=8A=A5=E5=91=8A?=
+ =?UTF-8?q?=E7=8A=B6=E6=80=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardKey.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardKey.kt
+index ce0aecb..18f8865 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardKey.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardKey.kt
+@@ -77,6 +77,7 @@ enum class KeyboardKey(val byte: Byte) {
+     KEY_UP_ARROW(0x52),
+     KEY_PAGE_UP(0x4B),
+     KEY_PAGE_DOWN(0x4E),
++    KEY_CAPS_LOCK(0x39),
+ 
+     // Modifier keys
+     KEY_SHIFT_LEFT(0x02),
+@@ -87,4 +88,4 @@ enum class KeyboardKey(val byte: Byte) {
+     KEY_CTRL_RIGHT(0x10),
+     KEY_ALT(0x04),
+     KEY_ALT_GR(0x40)
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportState.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportState.kt
+new file mode 100644
+index 0000000..3aa3deb
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportState.kt
+@@ -0,0 +1,74 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard
++
++class KeyboardReportState {
++
++    private val pressedKeys = linkedSetOf<Byte>()
++    private var modifierMask: Int = 0
++
++    var isCapsLockOn: Boolean = false
++        private set
++
++    fun pressModifier(modifier: Byte): ByteArray {
++        modifierMask = modifierMask or modifier.toInt()
++        return report()
++    }
++
++    fun releaseModifier(modifier: Byte): ByteArray {
++        modifierMask = modifierMask and modifier.toInt().inv()
++        return report()
++    }
++
++    fun pressKey(key: Byte): ByteArray {
++        if (pressedKeys.size < MAX_KEYS) {
++            pressedKeys.add(key)
++        }
++        return report()
++    }
++
++    fun releaseKey(key: Byte): ByteArray {
++        pressedKeys.remove(key)
++        return report()
++    }
++
++    fun toggleCapsLock(): List<ByteArray> {
++        isCapsLockOn = !isCapsLockOn
++        return listOf(
++            report(extraKeys = listOf(KeyboardKey.KEY_CAPS_LOCK.byte)),
++            ByteArray(REPORT_SIZE)
++        )
++    }
++
++    fun clear(): ByteArray {
++        pressedKeys.clear()
++        modifierMask = 0
++        isCapsLockOn = false
++        return ByteArray(REPORT_SIZE)
++    }
++
++    private fun report(extraKeys: List<Byte> = emptyList()): ByteArray {
++        val keys = (pressedKeys + extraKeys).take(MAX_KEYS)
++        val effectiveModifiers =
++            if (isCapsLockOn && keys.any { it.toInt() in LETTER_USAGE_RANGE }) {
++                modifierMask or KeyboardKey.KEY_SHIFT_LEFT.byte.toInt()
++            } else {
++                modifierMask
++            }
++
++        return byteArrayOf(
++            effectiveModifiers.toByte(),
++            0,
++            keys.getOrElse(0) { 0 },
++            keys.getOrElse(1) { 0 },
++            keys.getOrElse(2) { 0 },
++            keys.getOrElse(3) { 0 },
++            keys.getOrElse(4) { 0 },
++            keys.getOrElse(5) { 0 }
++        )
++    }
++
++    private companion object {
++        const val REPORT_SIZE = 8
++        const val MAX_KEYS = 6
++        val LETTER_USAGE_RANGE = 0x04..0x1D
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt
+new file mode 100644
+index 0000000..55425cc
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt
+@@ -0,0 +1,126 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard
++
++import org.junit.Assert.assertArrayEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class KeyboardReportStateTest {
++
++    @Test
++    fun pressAndReleaseLetterProducesDownAndUpReports() {
++        val state = KeyboardReportState()
++
++        assertArrayEquals(
++            byteArrayOf(0, 0, KeyboardKey.ROW_3_KEY_00.byte, 0, 0, 0, 0, 0),
++            state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
++        )
++        assertArrayEquals(
++            ByteArray(8),
++            state.releaseKey(KeyboardKey.ROW_3_KEY_00.byte)
++        )
++    }
++
++    @Test
++    fun modifierAndKeyAreReportedTogether() {
++        val state = KeyboardReportState()
++
++        state.pressModifier(KeyboardKey.KEY_CTRL_LEFT.byte)
++
++        assertArrayEquals(
++            byteArrayOf(
++                KeyboardKey.KEY_CTRL_LEFT.byte,
++                0,
++                KeyboardKey.ROW_4_KEY_03.byte,
++                0,
++                0,
++                0,
++                0,
++                0
++            ),
++            state.pressKey(KeyboardKey.ROW_4_KEY_03.byte)
++        )
++    }
++
++    @Test
++    fun capsLockAddsShiftOnlyToLetters() {
++        val state = KeyboardReportState()
++
++        state.toggleCapsLock()
++
++        assertArrayEquals(
++            byteArrayOf(
++                KeyboardKey.KEY_SHIFT_LEFT.byte,
++                0,
++                KeyboardKey.ROW_3_KEY_00.byte,
++                0,
++                0,
++                0,
++                0,
++                0
++            ),
++            state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
++        )
++        state.releaseKey(KeyboardKey.ROW_3_KEY_00.byte)
++        assertArrayEquals(
++            byteArrayOf(
++                0,
++                0,
++                KeyboardKey.ROW_1_KEY_01.byte,
++                0,
++                0,
++                0,
++                0,
++                0
++            ),
++            state.pressKey(KeyboardKey.ROW_1_KEY_01.byte)
++        )
++    }
++
++    @Test
++    fun capsLockTapSendsCapsThenZero() {
++        val state = KeyboardReportState()
++
++        val reports = state.toggleCapsLock()
++
++        assertArrayEquals(
++            byteArrayOf(
++                0,
++                0,
++                KeyboardKey.KEY_CAPS_LOCK.byte,
++                0,
++                0,
++                0,
++                0,
++                0
++            ),
++            reports[0]
++        )
++        assertArrayEquals(ByteArray(8), reports[1])
++        assertTrue(state.isCapsLockOn)
++    }
++
++    @Test
++    fun clearReleasesKeysModifiersAndCapsState() {
++        val state = KeyboardReportState()
++        state.pressModifier(KeyboardKey.KEY_SHIFT_LEFT.byte)
++        state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
++        state.toggleCapsLock()
++
++        assertArrayEquals(ByteArray(8), state.clear())
++        assertFalse(state.isCapsLockOn)
++        assertArrayEquals(
++            byteArrayOf(
++                0,
++                0,
++                KeyboardKey.ROW_3_KEY_00.byte,
++                0,
++                0,
++                0,
++                0,
++                0
++            ),
++            state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
++        )
++    }
++}

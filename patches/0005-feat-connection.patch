@@ -1,0 +1,318 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 22:48:37 +0800
+Subject: [PATCH] =?UTF-8?q?feat(connection):=20=E6=8C=81=E4=B9=85=E5=8C=96?=
+ =?UTF-8?q?=E6=96=AD=E5=BC=80=E4=B8=8E=E8=87=AA=E5=8A=A8=E8=BF=9E=E6=8E=A5?=
+ =?UTF-8?q?=E7=8A=B6=E6=80=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/common/utils/Constants.kt b/app/src/main/java/com/atharok/btremote/common/utils/Constants.kt
+index 03fdb45..bd03aa1 100644
+--- a/app/src/main/java/com/atharok/btremote/common/utils/Constants.kt
++++ b/app/src/main/java/com/atharok/btremote/common/utils/Constants.kt
+@@ -18,6 +18,7 @@ const val DATA_STORE_PREFERENCES_SETTINGS_NAME = "dataStoreSettings"
+ val DEFAULT_THEME = ThemeEntity.SYSTEM
+ const val DEFAULT_USE_BLACK_COLOR_FOR_DARK_THEME: Boolean = false
+ const val DEFAULT_USE_FULL_SCREEN: Boolean = false
++const val DEFAULT_DISCONNECT_ON_BACKGROUND: Boolean = true
+ 
+ // ---- Mouse ----
+ const val DEFAULT_MOUSE_SPEED: Float = 1f
+diff --git a/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt b/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt
+index 4d85108..6072a8c 100644
+--- a/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt
++++ b/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt
+@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.emptyPreferences
+ import androidx.datastore.preferences.core.floatPreferencesKey
+ import androidx.datastore.preferences.core.stringPreferencesKey
+ import com.atharok.btremote.common.extensions.dataStore
++import com.atharok.btremote.common.utils.DEFAULT_DISCONNECT_ON_BACKGROUND
+ import com.atharok.btremote.common.utils.DEFAULT_KEYBOARD_LANGUAGE
+ import com.atharok.btremote.common.utils.DEFAULT_MOUSE_SCROLL_SPEED
+ import com.atharok.btremote.common.utils.DEFAULT_MOUSE_SPEED
+@@ -28,8 +29,10 @@ import com.atharok.btremote.domain.entities.RemoteNavigationEntity
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
++import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
++import com.atharok.btremote.domain.entities.settings.connectionSettingsFrom
+ import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.flow.catch
+ import kotlinx.coroutines.flow.map
+@@ -61,6 +64,8 @@ class SettingsDataStore(private val context: Context) {
+ 
+         private const val FAVORITE_DEVICES_KEY = "favorite_devices_key"
+         private const val AUTO_CONNECT_DEVICE_ADDRESS_KEY = "auto_connect_device_address_key"
++        private const val AUTO_CONNECT_PAUSED_KEY = "auto_connect_paused_key"
++        private const val DISCONNECT_ON_BACKGROUND_KEY = "disconnect_on_background_key"
+         private const val SHOW_REMOTE_BUTTONS_IN_NOTIFICATION_KEY = "show_remote_buttons_in_notification_key"
+         private const val HIDE_BLUETOOTH_ACTIVATION_BUTTON_KEY = "hide_bluetooth_activation_button_key"
+     }
+@@ -85,6 +90,8 @@ class SettingsDataStore(private val context: Context) {
+     private val physicalVolumeDownButtonActionKey = stringPreferencesKey(PHYSICAL_VOLUME_BUTTON_DOWN_ACTION_KEY)
+     private val favoriteDevicesKey = stringPreferencesKey(FAVORITE_DEVICES_KEY)
+     private val autoConnectDeviceAddressKey = stringPreferencesKey(AUTO_CONNECT_DEVICE_ADDRESS_KEY)
++    private val autoConnectPausedKey = booleanPreferencesKey(AUTO_CONNECT_PAUSED_KEY)
++    private val disconnectOnBackgroundKey = booleanPreferencesKey(DISCONNECT_ON_BACKGROUND_KEY)
+     private val showRemoteButtonsInNotificationKey = booleanPreferencesKey(SHOW_REMOTE_BUTTONS_IN_NOTIFICATION_KEY)
+     private val hideBluetoothActivationButtonKey = booleanPreferencesKey(HIDE_BLUETOOTH_ACTIVATION_BUTTON_KEY)
+ 
+@@ -290,20 +297,41 @@ class SettingsDataStore(private val context: Context) {
+ 
+     // ---- Auto Connect ----
+ 
+-    val autoConnectDeviceAddressFlow: Flow<String> by lazy {
++    val connectionSettingsFlow: Flow<ConnectionSettings> by lazy {
+         context.dataStore.data
+             .catchException()
+             .map { preferences ->
+-                preferences[autoConnectDeviceAddressKey] ?: ""
++                connectionSettingsFrom(
++                    autoConnectDeviceAddress = preferences[autoConnectDeviceAddressKey],
++                    autoConnectPaused = preferences[autoConnectPausedKey],
++                    disconnectOnBackground = preferences[disconnectOnBackgroundKey]
++                        ?: DEFAULT_DISCONNECT_ON_BACKGROUND
++                )
+             }
+     }
+ 
++    val autoConnectDeviceAddressFlow: Flow<String> by lazy {
++        connectionSettingsFlow.map { it.autoConnectDeviceAddress }
++    }
++
+     suspend fun saveAutoConnectDeviceAddress(macAddress: String) {
+         context.dataStore.edit {
+             it[autoConnectDeviceAddressKey] = macAddress
+         }
+     }
+ 
++    suspend fun saveAutoConnectPaused(paused: Boolean) {
++        context.dataStore.edit {
++            it[autoConnectPausedKey] = paused
++        }
++    }
++
++    suspend fun saveDisconnectOnBackground(enabled: Boolean) {
++        context.dataStore.edit {
++            it[disconnectOnBackgroundKey] = enabled
++        }
++    }
++
+     // ---- Advanced Options ----
+ 
+     val showRemoteButtonsInNotificationFlow: Flow<Boolean> by lazy {
+diff --git a/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt b/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt
+index 2e0e064..46f9d7a 100644
+--- a/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt
++++ b/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt
+@@ -5,6 +5,7 @@ import com.atharok.btremote.domain.entities.RemoteNavigationEntity
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
++import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
+ import com.atharok.btremote.domain.repositories.DataStoreRepository
+@@ -40,6 +41,9 @@ class DataStoreRepositoryImpl(
+     override val remoteSettingsFlow: Flow<RemoteSettings>
+         get() = settingsDataStore.remoteSettingsFlow
+ 
++    override val connectionSettingsFlow: Flow<ConnectionSettings>
++        get() = settingsDataStore.connectionSettingsFlow
++
+     override suspend fun saveMouseSpeed(mouseSpeed: Float) {
+         settingsDataStore.saveMouseSpeed(mouseSpeed)
+     }
+@@ -108,6 +112,14 @@ class DataStoreRepositoryImpl(
+         settingsDataStore.saveAutoConnectDeviceAddress(macAddress)
+     }
+ 
++    override suspend fun saveAutoConnectPaused(paused: Boolean) {
++        settingsDataStore.saveAutoConnectPaused(paused)
++    }
++
++    override suspend fun saveDisconnectOnBackground(enabled: Boolean) {
++        settingsDataStore.saveDisconnectOnBackground(enabled)
++    }
++
+     override fun showRemoteButtonsInNotification(): Flow<Boolean> = settingsDataStore.showRemoteButtonsInNotificationFlow
+     override suspend fun saveShowRemoteButtonsInNotification(show: Boolean) {
+         settingsDataStore.saveShowRemoteButtonsInNotification(show)
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/settings/ConnectionSettings.kt b/app/src/main/java/com/atharok/btremote/domain/entities/settings/ConnectionSettings.kt
+new file mode 100644
+index 0000000..d5cdffe
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/settings/ConnectionSettings.kt
+@@ -0,0 +1,23 @@
++package com.atharok.btremote.domain.entities.settings
++
++import com.atharok.btremote.common.utils.DEFAULT_DISCONNECT_ON_BACKGROUND
++
++data class ConnectionSettings(
++    val autoConnectDeviceAddress: String = "",
++    val autoConnectPaused: Boolean = false,
++    val disconnectOnBackground: Boolean = DEFAULT_DISCONNECT_ON_BACKGROUND
++) {
++    fun autoConnectAddressForStart(explicitAddress: String? = null): String =
++        explicitAddress ?: if (autoConnectPaused) "" else autoConnectDeviceAddress
++}
++
++internal fun connectionSettingsFrom(
++    autoConnectDeviceAddress: String?,
++    autoConnectPaused: Boolean?,
++    disconnectOnBackground: Boolean?
++): ConnectionSettings =
++    ConnectionSettings(
++        autoConnectDeviceAddress = autoConnectDeviceAddress ?: "",
++        autoConnectPaused = autoConnectPaused ?: false,
++        disconnectOnBackground = disconnectOnBackground ?: DEFAULT_DISCONNECT_ON_BACKGROUND
++    )
+diff --git a/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt b/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt
+index d7f4cf6..4516c8e 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt
+@@ -4,6 +4,7 @@ import com.atharok.btremote.domain.entities.RemoteNavigationEntity
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
++import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
+ import kotlinx.coroutines.flow.Flow
+@@ -25,6 +26,7 @@ interface DataStoreRepository {
+     // ---- Remote ----
+ 
+     val remoteSettingsFlow: Flow<RemoteSettings>
++    val connectionSettingsFlow: Flow<ConnectionSettings>
+ 
+     suspend fun saveMouseSpeed(mouseSpeed: Float)
+ 
+@@ -61,6 +63,8 @@ interface DataStoreRepository {
+ 
+     fun getAutoConnectDeviceAddressFlow(): Flow<String>
+     suspend fun saveAutoConnectDeviceAddress(macAddress: String)
++    suspend fun saveAutoConnectPaused(paused: Boolean)
++    suspend fun saveDisconnectOnBackground(enabled: Boolean)
+ 
+     fun showRemoteButtonsInNotification(): Flow<Boolean>
+     suspend fun saveShowRemoteButtonsInNotification(show: Boolean)
+diff --git a/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt b/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt
+index 7913b36..97c0f12 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/usecases/AppScopeUseCase.kt
+@@ -2,6 +2,7 @@ package com.atharok.btremote.domain.usecases
+ 
+ import com.atharok.btremote.domain.entities.DeviceHidConnectionState
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
++import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.repositories.BluetoothRepository
+ import com.atharok.btremote.domain.repositories.DataStoreRepository
+ import kotlinx.coroutines.flow.Flow
+@@ -16,6 +17,9 @@ class AppScopeUseCase(
+ 
+     val appearanceSettingsFlow: Flow<AppearanceSettings> get() = dataStoreRepository.appearanceSettingsFlow
+ 
++    val connectionSettingsFlow: Flow<ConnectionSettings> =
++        dataStoreRepository.connectionSettingsFlow
++
+     // ---- Local Device Name ----
+ 
+     fun getLocalDeviceName(): String = bluetoothRepository.getLocalDeviceName()
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt
+index b99ddd9..e56e555 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/AppScopeViewModel.kt
+@@ -3,6 +3,7 @@ package com.atharok.btremote.presentation.viewmodel
+ import androidx.lifecycle.ViewModel
+ import com.atharok.btremote.domain.entities.DeviceHidConnectionState
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
++import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.usecases.AppScopeUseCase
+ import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.flow.StateFlow
+@@ -15,6 +16,9 @@ class AppScopeViewModel(
+ 
+     val appearanceSettingsFlow: Flow<AppearanceSettings> = useCase.appearanceSettingsFlow
+ 
++    val connectionSettingsFlow: Flow<ConnectionSettings> =
++        useCase.connectionSettingsFlow
++
+     // ---- Local Device Name ----
+ 
+     val localDeviceName: String get() = useCase.getLocalDeviceName()
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/settings/ConnectionSettingsTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/settings/ConnectionSettingsTest.kt
+new file mode 100644
+index 0000000..7a945f9
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/settings/ConnectionSettingsTest.kt
+@@ -0,0 +1,65 @@
++package com.atharok.btremote.domain.entities.settings
++
++import com.atharok.btremote.common.utils.DEFAULT_DISCONNECT_ON_BACKGROUND
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class ConnectionSettingsTest {
++
++    @Test
++    fun defaultsKeepDisconnectOnBackgroundEnabled() {
++        val settings = ConnectionSettings()
++
++        assertEquals("", settings.autoConnectDeviceAddress)
++        assertFalse(settings.autoConnectPaused)
++        assertTrue(DEFAULT_DISCONNECT_ON_BACKGROUND)
++        assertTrue(settings.disconnectOnBackground)
++    }
++
++    @Test
++    fun missingPreferencesUseSafeDefaults() {
++        assertEquals(
++            ConnectionSettings(),
++            connectionSettingsFrom(
++                autoConnectDeviceAddress = null,
++                autoConnectPaused = null,
++                disconnectOnBackground = null
++            )
++        )
++    }
++
++    @Test
++    fun pausedAutoConnectProducesNoImplicitAddress() {
++        val settings = ConnectionSettings(
++            autoConnectDeviceAddress = "AA:BB:CC:DD:EE:FF",
++            autoConnectPaused = true
++        )
++
++        assertEquals("", settings.autoConnectAddressForStart())
++    }
++
++    @Test
++    fun explicitManualAddressOverridesPause() {
++        val settings = ConnectionSettings(
++            autoConnectDeviceAddress = "",
++            autoConnectPaused = true
++        )
++
++        assertEquals(
++            "11:22:33:44:55:66",
++            settings.autoConnectAddressForStart("11:22:33:44:55:66")
++        )
++    }
++
++    @Test
++    fun unpausedAutoConnectUsesSavedAddress() {
++        val settings = ConnectionSettings(
++            autoConnectDeviceAddress = "AA:BB:CC:DD:EE:FF",
++            autoConnectPaused = false
++        )
++
++        assertEquals("AA:BB:CC:DD:EE:FF", settings.autoConnectAddressForStart())
++    }
++}

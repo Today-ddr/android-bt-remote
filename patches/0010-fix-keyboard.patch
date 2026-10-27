@@ -1,0 +1,162 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 23:07:08 +0800
+Subject: [PATCH] =?UTF-8?q?fix(keyboard):=20=E5=90=8C=E6=AD=A5=E5=8F=91?=
+ =?UTF-8?q?=E9=80=81=E6=8C=89=E9=94=AE=E5=B9=B6=E4=BF=9D=E8=AF=81=E9=87=8A?=
+ =?UTF-8?q?=E6=94=BE=E5=AE=89=E5=85=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt b/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
+index bdfe96f..b4203e1 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
+@@ -5,13 +5,13 @@ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+-import androidx.compose.foundation.layout.WindowInsets
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.sizeIn
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
++import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
+@@ -26,12 +26,16 @@ import androidx.compose.ui.res.dimensionResource
+ import androidx.compose.ui.unit.Dp
+ import androidx.compose.ui.unit.LayoutDirection
+ import androidx.compose.ui.unit.dp
++import androidx.lifecycle.Lifecycle
++import androidx.lifecycle.LifecycleEventObserver
++import androidx.lifecycle.compose.LocalLifecycleOwner
+ import com.atharok.btremote.R
+ import com.atharok.btremote.common.utils.getAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardReportState
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardKey
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.TextAdvancedKeyboardKey
+ import com.atharok.btremote.ui.theme.surfaceElevationHigh
+ 
+ @Composable
+@@ -43,7 +47,7 @@ fun AdvancedKeyboardModalBottomSheet(
+ ) {
+     KeyboardModalBottomSheet(
+         onShowKeyboardBottomSheetChanged = onShowKeyboardBottomSheetChanged,
+-        windowInsets = WindowInsets(0, 0, 0, 0),
++        windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
+         modifier = modifier
+     ) {
+         AdvancedKeyboard(
+@@ -67,25 +71,60 @@ fun AdvancedKeyboard(
+ ) {
+     val configuration = LocalConfiguration.current
+     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
++    val reportState = remember { KeyboardReportState() }
++    val lifecycleOwner = LocalLifecycleOwner.current
+ 
+     var keyboardLayout: AdvancedKeyboardLayout by remember {
+         mutableStateOf(getAdvancedKeyboardLayout(keyboardLanguage))
+     }
+ 
+-    var modifierKeyByte: Byte by remember {
+-        mutableStateOf(0x00)
++    LaunchedEffect(keyboardLanguage) {
++        sendKeyboardKeyReport(reportState.clear())
++        keyboardLayout = getAdvancedKeyboardLayout(keyboardLanguage)
+     }
+ 
+-    var keyByte: Byte by remember {
+-        mutableStateOf(0x00)
++    DisposableEffect(lifecycleOwner, reportState) {
++        val observer = LifecycleEventObserver { _, event ->
++            if (event == Lifecycle.Event.ON_STOP) {
++                sendKeyboardKeyReport(reportState.clear())
++            }
++        }
++        lifecycleOwner.lifecycle.addObserver(observer)
++
++        onDispose {
++            lifecycleOwner.lifecycle.removeObserver(observer)
++            sendKeyboardKeyReport(reportState.clear())
++        }
+     }
+ 
+-    LaunchedEffect(keyboardLanguage) {
+-        keyboardLayout = getAdvancedKeyboardLayout(keyboardLanguage)
++    fun sendKeyDown(key: AdvancedKeyboardKey) {
++        when (key.behavior) {
++            AdvancedKeyBehavior.KEY -> {
++                sendKeyboardKeyReport(reportState.pressKey(key.byte))
++            }
++
++            AdvancedKeyBehavior.MODIFIER -> {
++                sendKeyboardKeyReport(reportState.pressModifier(key.byte))
++            }
++
++            AdvancedKeyBehavior.CAPS_LOCK -> {
++                reportState.toggleCapsLock().forEach(sendKeyboardKeyReport)
++            }
++        }
+     }
+ 
+-    LaunchedEffect(modifierKeyByte, keyByte) {
+-        sendKeyboardKeyReport(byteArrayOf(modifierKeyByte, keyByte))
++    fun sendKeyUp(key: AdvancedKeyboardKey) {
++        when (key.behavior) {
++            AdvancedKeyBehavior.KEY -> {
++                sendKeyboardKeyReport(reportState.releaseKey(key.byte))
++            }
++
++            AdvancedKeyBehavior.MODIFIER -> {
++                sendKeyboardKeyReport(reportState.releaseModifier(key.byte))
++            }
++
++            AdvancedKeyBehavior.CAPS_LOCK -> Unit
++        }
+     }
+ 
+     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+@@ -106,25 +145,10 @@ fun AdvancedKeyboard(
+                             .weight(1f),
+                         horizontalArrangement = Arrangement.Absolute.spacedBy(dimensionResource(id = R.dimen.padding_small))
+                     ) {
+-                        keyboardRow.forEach { keyboardKey: AdvancedKeyboardKey ->
++                        keyboardRow.forEach { keyboardKey ->
+                             keyboardKey.KeyboardKeyView(
+-                                touchDown = {
+-                                    if (keyboardKey is TextAdvancedKeyboardKey) {
+-                                        modifierKeyByte = (modifierKeyByte + it).toByte()
+-                                    } else {
+-                                        keyByte = it
+-                                    }
+-                                },
+-                                touchUp = {
+-                                    if (keyboardKey is TextAdvancedKeyboardKey) {
+-                                        modifierKeyByte = (modifierKeyByte - it).toByte()
+-                                    } else {
+-                                        // If 'it' is the last input pressed
+-                                        if (it == keyByte) {
+-                                            keyByte = 0x00
+-                                        }
+-                                    }
+-                                },
++                                touchDown = { sendKeyDown(keyboardKey) },
++                                touchUp = { sendKeyUp(keyboardKey) },
+                                 modifier = Modifier.weight(keyboardKey.weight),
+                                 shape = shape,
+                                 elevation = keyElevation
+@@ -135,4 +159,4 @@ fun AdvancedKeyboard(
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
