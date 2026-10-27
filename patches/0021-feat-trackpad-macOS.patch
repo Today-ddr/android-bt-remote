@@ -1,0 +1,866 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 01:37:57 +0800
+Subject: [PATCH] =?UTF-8?q?feat(trackpad):=20=E6=8E=A5=E5=85=A5=20macOS=20?=
+ =?UTF-8?q?=E5=A4=9A=E6=8C=87=E6=89=8B=E5=8A=BF=E4=B8=8E=E6=8C=AF=E5=8A=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapper.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapper.kt
+new file mode 100644
+index 0000000..40b7e73
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapper.kt
+@@ -0,0 +1,129 @@
++package com.atharok.btremote.domain.entities.remoteInput.trackpad
++
++import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
++
++sealed interface TrackpadGestureCommand {
++
++    data class Mouse(
++        val button: MouseAction,
++        val dx: Float,
++        val dy: Float,
++        val wheel: Float
++    ) : TrackpadGestureCommand
++
++    data class Keyboard(
++        val press: ByteArray,
++        val release: ByteArray
++    ) : TrackpadGestureCommand
++
++    data class Haptic(val event: TrackpadHapticEvent) : TrackpadGestureCommand
++}
++
++/**
++ * Converts semantic recognizer output into the existing HID mouse and keyboard report payloads.
++ * Keeping this mapping independent of Compose makes chord selection and direction resolution
++ * testable without an Android device.
++ */
++class TrackpadGestureCommandMapper(
++    private val settings: TrackpadSettings,
++    private val mouseSpeed: Float = 1f,
++    private val scrollSpeed: Float = 1f
++) {
++
++    fun map(outputs: List<TrackpadGestureOutput>): List<TrackpadGestureCommand> =
++        outputs.flatMap(::map)
++
++    fun map(output: TrackpadGestureOutput): List<TrackpadGestureCommand> = when (output) {
++        is TrackpadGestureOutput.Move -> listOf(
++            TrackpadGestureCommand.Mouse(
++                button = if (output.dragging) MouseAction.MOUSE_CLICK_LEFT else MouseAction.NONE,
++                dx = output.dx * mouseSpeed,
++                dy = output.dy * mouseSpeed,
++                wheel = 0f
++            )
++        )
++
++        is TrackpadGestureOutput.Click -> listOf(
++            TrackpadGestureCommand.Mouse(output.button, 0f, 0f, 0f),
++            TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)
++        )
++
++        TrackpadGestureOutput.DragStart -> listOf(
++            TrackpadGestureCommand.Mouse(MouseAction.MOUSE_CLICK_LEFT, 0f, 0f, 0f)
++        )
++
++        TrackpadGestureOutput.DragEnd -> listOf(
++            TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)
++        )
++
++        is TrackpadGestureOutput.Scroll -> listOf(
++            TrackpadGestureCommand.Mouse(
++                button = MouseAction.NONE,
++                dx = 0f,
++                dy = 0f,
++                wheel = output.amount * scrollSpeed
++            )
++        )
++
++        is TrackpadGestureOutput.Zoom -> executePinch(output.scaleDelta)
++        is TrackpadGestureOutput.Rotate -> execute(resolveRotationAction(output.radians))
++        is TrackpadGestureOutput.Action -> execute(output.action.chord)
++        is TrackpadGestureOutput.Haptic -> listOf(TrackpadGestureCommand.Haptic(output.event))
++    }
++
++    private fun executePinch(scaleDelta: Float): List<TrackpadGestureCommand> {
++        if (settings.pinchAction != TrackpadGestureAction.ZOOM) {
++            return execute(settings.pinchAction)
++        }
++        val key = if (scaleDelta > 0f) {
++            KeyboardKey.ROW_1_KEY_12.byte
++        } else {
++            KeyboardKey.ROW_1_KEY_11.byte
++        }
++        return execute(
++            GestureChord(
++                key = key,
++                modifiers = COMMAND_MODIFIER,
++                mouseButton = null
++            )
++        )
++    }
++
++    private fun resolveRotationAction(radians: Float): TrackpadGestureAction =
++        when (settings.rotationAction) {
++            TrackpadGestureAction.ROTATE_LEFT,
++            TrackpadGestureAction.ROTATE_RIGHT -> if (radians > 0f) {
++                TrackpadGestureAction.ROTATE_RIGHT
++            } else {
++                TrackpadGestureAction.ROTATE_LEFT
++            }
++            else -> settings.rotationAction
++        }
++
++    private fun execute(action: TrackpadGestureAction): List<TrackpadGestureCommand> =
++        execute(action.chord)
++
++    private fun execute(chord: GestureChord?): List<TrackpadGestureCommand> {
++        if (chord == null) return emptyList()
++        val mouseButton = chord.mouseButton
++        return if (mouseButton != null) {
++            listOf(
++                TrackpadGestureCommand.Mouse(mouseButton, 0f, 0f, 0f),
++                TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)
++            )
++        } else {
++            listOf(
++                TrackpadGestureCommand.Keyboard(
++                    press = chord.pressReport(),
++                    release = chord.releaseReport()
++                )
++            )
++        }
++    }
++
++    private companion object {
++        const val COMMAND_MODIFIER = 0x08
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/haptics/HapticFeedbackProvider.kt b/app/src/main/java/com/atharok/btremote/ui/haptics/HapticFeedbackProvider.kt
+new file mode 100644
+index 0000000..e9e83b4
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/ui/haptics/HapticFeedbackProvider.kt
+@@ -0,0 +1,64 @@
++package com.atharok.btremote.ui.haptics
++
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.CompositionLocalProvider
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.staticCompositionLocalOf
++import androidx.compose.ui.hapticfeedback.HapticFeedback
++import androidx.compose.ui.hapticfeedback.HapticFeedbackType
++import androidx.compose.ui.platform.LocalHapticFeedback
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadHapticEvent
++import com.atharok.btremote.domain.entities.settings.HapticSettings
++import com.atharok.btremote.domain.haptics.HapticSource
++import com.atharok.btremote.presentation.haptics.AndroidHapticFeedbackController
++
++internal data class HapticActions(
++    val trackpadTap: () -> Unit,
++    val scrollTick: () -> Unit,
++    val keyboardTap: () -> Unit
++) {
++
++    fun performTrackpad(event: TrackpadHapticEvent) {
++        if (event == TrackpadHapticEvent.SCROLL) {
++            scrollTick()
++        } else {
++            trackpadTap()
++        }
++    }
++}
++
++internal val LocalHapticActions = staticCompositionLocalOf {
++    HapticActions(
++        trackpadTap = {},
++        scrollTick = {},
++        keyboardTap = {}
++    )
++}
++
++@Composable
++internal fun HapticFeedbackProvider(
++    controller: AndroidHapticFeedbackController,
++    settings: HapticSettings,
++    content: @Composable () -> Unit
++) {
++    val actions = remember(controller, settings) {
++        HapticActions(
++            trackpadTap = { controller.tap(settings, HapticSource.TRACKPAD) },
++            scrollTick = { controller.scrollTick(settings) },
++            keyboardTap = { controller.tap(settings, HapticSource.KEYBOARD) }
++        )
++    }
++    val composeHapticFeedback = remember(actions) {
++        object : HapticFeedback {
++            override fun performHapticFeedback(hapticFeedbackType: HapticFeedbackType) {
++                actions.keyboardTap()
++            }
++        }
++    }
++
++    CompositionLocalProvider(
++        LocalHapticActions provides actions,
++        LocalHapticFeedback provides composeHapticFeedback,
++        content = content
++    )
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/screens/RemoteScreen.kt b/app/src/main/java/com/atharok/btremote/ui/screens/RemoteScreen.kt
+index 6a2b5b5..a1911de 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/screens/RemoteScreen.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/screens/RemoteScreen.kt
+@@ -45,7 +45,10 @@ import com.atharok.btremote.domain.entities.remoteInput.MouseAction
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.virtualKeyboard.VirtualKeyboardLayout
++import com.atharok.btremote.domain.entities.settings.HapticSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
++import com.atharok.btremote.presentation.haptics.AndroidHapticFeedbackController
+ import com.atharok.btremote.presentation.services.BluetoothHidService
+ import com.atharok.btremote.presentation.viewmodel.RemoteViewModel
+ import com.atharok.btremote.ui.components.AppScaffold
+@@ -55,6 +58,7 @@ import com.atharok.btremote.ui.components.FadeAnimatedContent
+ import com.atharok.btremote.ui.components.LoadingDialog
+ import com.atharok.btremote.ui.components.MoreOverflowMenu
+ import com.atharok.btremote.ui.components.PhysicalVolumeButtonsHandler
++import com.atharok.btremote.ui.haptics.HapticFeedbackProvider
+ import com.atharok.btremote.ui.theme.surfaceElevationMedium
+ import com.atharok.btremote.ui.views.RemoteScreenHelpModalBottomSheet
+ import com.atharok.btremote.ui.views.keyboard.AdvancedKeyboard
+@@ -88,6 +92,13 @@ fun RemoteScreen(
+ 
+     val remoteSettings by remoteViewModel
+         .remoteSettingsFlow.collectAsStateWithLifecycle(RemoteSettings())
++    val trackpadSettings by remoteViewModel
++        .trackpadSettingsFlow.collectAsStateWithLifecycle(TrackpadSettings())
++    val hapticSettings by remoteViewModel
++        .hapticSettingsFlow.collectAsStateWithLifecycle(HapticSettings())
++    val hapticController = remember(context) {
++        AndroidHapticFeedbackController.from(context)
++    }
+ 
+     // Remote
+     var navigationToggle by rememberSaveable(remoteSettings.useMouseNavigationByDefault) { mutableStateOf(if(remoteSettings.useMouseNavigationByDefault) NavigationToggle.MOUSE else NavigationToggle.DIRECTION) }
+@@ -109,87 +120,93 @@ fun RemoteScreen(
+         remoteViewModel = remoteViewModel
+     )
+ 
+-    StatelessRemoteScreen(
+-        deviceName = bluetoothDeviceHidConnectionState.deviceName,
+-        isLandscapeMode = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE,
+-        topBarActions = {
+-            TopBarActions(
+-                navigateToSettings = navigateToSettings,
+-                disconnectDevice = {
+-                    remoteViewModel.disconnectDevice()
+-                },
+-                disconnectCompletely = disconnectCompletely,
+-                navigationToggle = navigationToggle,
+-                onNavigationToggleChanged = { navigationToggle = it },
+-                useAdvancedKeyboardIntegrated = remoteSettings.useAdvancedKeyboard && remoteSettings.useAdvancedKeyboardIntegrated,
+-                isKeyboardVisible = isKeyboardVisible,
+-                onKeyboardVisibleChanged = { isKeyboardVisible = it },
+-                isMoreButtonsVisible = isMoreButtonsVisible,
+-                onMoreButtonsVisibleChanged = { isMoreButtonsVisible = it },
+-                isHelpBottomSheetVisible = isHelpBottomSheetVisible,
+-                onHelpBottomSheetVisibleChanged = { isHelpBottomSheetVisible = it }
+-            )
+-        },
+-        remoteLayout = {
+-            RemoteLayout(
+-                useMinimalistRemote = remoteSettings.useMinimalistRemote,
+-                isAdvancedKeyboardVisible = remoteSettings.useAdvancedKeyboard && remoteSettings.useAdvancedKeyboardIntegrated && isKeyboardVisible,
+-                onMoreButtonsVisibleChanged = { isMoreButtonsVisible = !isMoreButtonsVisible },
+-                keyboardLanguage = remoteSettings.keyboardLanguage,
+-                sendRemoteKeyReport = remoteViewModel.sendRemoteReport,
+-                sendKeyboardKeyReport = remoteViewModel.sendKeyboardReport
+-            )
+-        },
+-        navigationLayout = {
+-            NavigationLayout(
+-                remoteSettings = remoteSettings,
+-                sendRemoteKeyReport = remoteViewModel.sendRemoteReport,
+-                sendKeyboardKeyReport = remoteViewModel.sendKeyboardReport,
+-                sendMouseKeyReport = remoteViewModel.sendMouseReport,
+-                navigationToggle = navigationToggle,
+-            )
+-        },
+-        overlayView = {
+-            // Dialog / ModalBottomSheet
+-            when {
+-                bluetoothDeviceHidConnectionState.state == BluetoothHidDevice.STATE_DISCONNECTING -> {
+-                    LoadingDialog(
+-                        title = stringResource(id = R.string.connection),
+-                        message = stringResource(id = R.string.bluetooth_device_disconnecting_message, bluetoothDeviceHidConnectionState.deviceName),
+-                        buttonText = stringResource(id = R.string.disconnect),
+-                        onButtonClick = {
+-                            remoteViewModel.disconnectDevice()
+-                            BluetoothHidService.stop(context) // force disconnection
+-                        }
+-                    )
+-                }
+-                isHelpBottomSheetVisible -> {
+-                    RemoteScreenHelpModalBottomSheet(
+-                        onDismissRequest = { isHelpBottomSheetVisible = false },
+-                        modifier = modifier
+-                    )
+-                }
+-                isKeyboardVisible && (!remoteSettings.useAdvancedKeyboard || !remoteSettings.useAdvancedKeyboardIntegrated) -> {
+-                    KeyboardModalBottomSheet(
+-                        useAdvancedKeyboard = remoteSettings.useAdvancedKeyboard,
+-                        keyboardLanguage = remoteSettings.keyboardLanguage,
+-                        mustClearInputField = remoteSettings.mustClearInputField,
+-                        sendKeyboardKeyReport = remoteViewModel.sendKeyboardReport,
+-                        sendTextReport = remoteViewModel.sendTextReport,
+-                        onShowKeyboardChanged = { isKeyboardVisible = it }
+-                    )
+-                }
+-                isMoreButtonsVisible -> {
+-                    MoreButtonsDialog(
+-                        sendRemoteKeyReport = remoteViewModel.sendRemoteReport,
+-                        sendKeyboardKeyReport = remoteViewModel.sendKeyboardReport,
+-                        onDismissRequest = { isMoreButtonsVisible = false }
+-                    )
++    HapticFeedbackProvider(
++        controller = hapticController,
++        settings = hapticSettings
++    ) {
++        StatelessRemoteScreen(
++            deviceName = bluetoothDeviceHidConnectionState.deviceName,
++            isLandscapeMode = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE,
++            topBarActions = {
++                TopBarActions(
++                    navigateToSettings = navigateToSettings,
++                    disconnectDevice = {
++                        remoteViewModel.disconnectDevice()
++                    },
++                    disconnectCompletely = disconnectCompletely,
++                    navigationToggle = navigationToggle,
++                    onNavigationToggleChanged = { navigationToggle = it },
++                    useAdvancedKeyboardIntegrated = remoteSettings.useAdvancedKeyboard && remoteSettings.useAdvancedKeyboardIntegrated,
++                    isKeyboardVisible = isKeyboardVisible,
++                    onKeyboardVisibleChanged = { isKeyboardVisible = it },
++                    isMoreButtonsVisible = isMoreButtonsVisible,
++                    onMoreButtonsVisibleChanged = { isMoreButtonsVisible = it },
++                    isHelpBottomSheetVisible = isHelpBottomSheetVisible,
++                    onHelpBottomSheetVisibleChanged = { isHelpBottomSheetVisible = it }
++                )
++            },
++            remoteLayout = {
++                RemoteLayout(
++                    useMinimalistRemote = remoteSettings.useMinimalistRemote,
++                    isAdvancedKeyboardVisible = remoteSettings.useAdvancedKeyboard && remoteSettings.useAdvancedKeyboardIntegrated && isKeyboardVisible,
++                    onMoreButtonsVisibleChanged = { isMoreButtonsVisible = !isMoreButtonsVisible },
++                    keyboardLanguage = remoteSettings.keyboardLanguage,
++                    sendRemoteKeyReport = remoteViewModel.sendRemoteReport,
++                    sendKeyboardKeyReport = remoteViewModel.sendKeyboardReport
++                )
++            },
++            navigationLayout = {
++                NavigationLayout(
++                    remoteSettings = remoteSettings,
++                    sendRemoteKeyReport = remoteViewModel.sendRemoteReport,
++                    sendKeyboardKeyReport = remoteViewModel.sendKeyboardReport,
++                    sendMouseKeyReport = remoteViewModel.sendMouseReport,
++                    trackpadSettings = trackpadSettings,
++                    navigationToggle = navigationToggle,
++                )
++            },
++            overlayView = {
++                // Dialog / ModalBottomSheet
++                when {
++                    bluetoothDeviceHidConnectionState.state == BluetoothHidDevice.STATE_DISCONNECTING -> {
++                        LoadingDialog(
++                            title = stringResource(id = R.string.connection),
++                            message = stringResource(id = R.string.bluetooth_device_disconnecting_message, bluetoothDeviceHidConnectionState.deviceName),
++                            buttonText = stringResource(id = R.string.disconnect),
++                            onButtonClick = {
++                                remoteViewModel.disconnectDevice()
++                                BluetoothHidService.stop(context) // force disconnection
++                            }
++                        )
++                    }
++                    isHelpBottomSheetVisible -> {
++                        RemoteScreenHelpModalBottomSheet(
++                            onDismissRequest = { isHelpBottomSheetVisible = false },
++                            modifier = modifier
++                        )
++                    }
++                    isKeyboardVisible && (!remoteSettings.useAdvancedKeyboard || !remoteSettings.useAdvancedKeyboardIntegrated) -> {
++                        KeyboardModalBottomSheet(
++                            useAdvancedKeyboard = remoteSettings.useAdvancedKeyboard,
++                            keyboardLanguage = remoteSettings.keyboardLanguage,
++                            mustClearInputField = remoteSettings.mustClearInputField,
++                            sendKeyboardKeyReport = remoteViewModel.sendKeyboardReport,
++                            sendTextReport = remoteViewModel.sendTextReport,
++                            onShowKeyboardChanged = { isKeyboardVisible = it }
++                        )
++                    }
++                    isMoreButtonsVisible -> {
++                        MoreButtonsDialog(
++                            sendRemoteKeyReport = remoteViewModel.sendRemoteReport,
++                            sendKeyboardKeyReport = remoteViewModel.sendKeyboardReport,
++                            onDismissRequest = { isMoreButtonsVisible = false }
++                        )
++                    }
+                 }
+-            }
+-        },
+-        modifier = modifier
+-    )
++            },
++            modifier = modifier
++        )
++    }
+ }
+ 
+ @OptIn(ExperimentalMaterial3Api::class)
+@@ -381,6 +398,7 @@ private fun NavigationLayout(
+     sendRemoteKeyReport: (ByteArray) -> Unit,
+     sendKeyboardKeyReport: (ByteArray) -> Unit,
+     sendMouseKeyReport: (input: MouseAction, x: Float, y: Float, wheel: Float) -> Unit,
++    trackpadSettings: TrackpadSettings,
+     navigationToggle: NavigationToggle
+ ) {
+     FadeAnimatedContent(targetState = navigationToggle) {
+@@ -400,7 +418,9 @@ private fun NavigationLayout(
+                     scrollSpeed = remoteSettings.mouseScrollSpeed,
+                     shouldInvertMouseScrollingDirection = remoteSettings.shouldInvertMouseScrollingDirection,
+                     useGyroscope = remoteSettings.useGyroscope,
++                    trackpadSettings = trackpadSettings,
+                     sendMouseInput = sendMouseKeyReport,
++                    sendKeyboardReport = sendKeyboardKeyReport,
+                     modifier = Modifier
+                 )
+             }
+diff --git a/app/src/main/java/com/atharok/btremote/ui/views/mouse/MacTrackpad.kt b/app/src/main/java/com/atharok/btremote/ui/views/mouse/MacTrackpad.kt
+new file mode 100644
+index 0000000..c34e877
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/ui/views/mouse/MacTrackpad.kt
+@@ -0,0 +1,179 @@
++package com.atharok.btremote.ui.views.mouse
++
++import androidx.compose.foundation.gestures.awaitEachGesture
++import androidx.compose.foundation.gestures.awaitFirstDown
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberUpdatedState
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Shape
++import androidx.compose.ui.input.pointer.PointerEvent
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.platform.LocalDensity
++import androidx.compose.ui.unit.Density
++import androidx.compose.ui.unit.dp
++import androidx.lifecycle.Lifecycle
++import androidx.lifecycle.LifecycleEventObserver
++import androidx.lifecycle.compose.LocalLifecycleOwner
++import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureCommand
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureCommandMapper
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureOutput
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureRecognizer
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadPointer
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadTouch
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
++import com.atharok.btremote.ui.components.DefaultElevatedCard
++import com.atharok.btremote.ui.haptics.LocalHapticActions
++
++private data class GestureThresholds(
++    val tapSlop: Float,
++    val scrollClaimDistance: Float,
++    val swipeDistance: Float,
++    val scrollStep: Float
++)
++
++@Composable
++fun MacTrackpad(
++    mouseSpeed: Float,
++    scrollSpeed: Float,
++    shouldInvertMouseScrollingDirection: Boolean,
++    trackpadSettings: TrackpadSettings,
++    sendMouseInput: (MouseAction, Float, Float, Float) -> Unit,
++    sendKeyboardReport: (ByteArray) -> Unit,
++    shape: Shape,
++    modifier: Modifier = Modifier
++) {
++    val density = LocalDensity.current
++    val thresholds = remember(density) { density.gestureThresholds() }
++    val recognizer = remember(
++        trackpadSettings,
++        shouldInvertMouseScrollingDirection,
++        thresholds
++    ) {
++        TrackpadGestureRecognizer(
++            settings = trackpadSettings,
++            invertScroll = shouldInvertMouseScrollingDirection,
++            scrollStep = thresholds.scrollStep,
++            tapSlop = thresholds.tapSlop,
++            scrollClaimDistance = thresholds.scrollClaimDistance,
++            swipeDistance = thresholds.swipeDistance
++        )
++    }
++    val commandMapper = remember(trackpadSettings, mouseSpeed, scrollSpeed) {
++        TrackpadGestureCommandMapper(
++            settings = trackpadSettings,
++            mouseSpeed = mouseSpeed,
++            scrollSpeed = scrollSpeed
++        )
++    }
++    val hapticActions = LocalHapticActions.current
++    val currentHapticActions by rememberUpdatedState(hapticActions)
++    val currentSendMouseInput by rememberUpdatedState(sendMouseInput)
++    val currentSendKeyboardReport by rememberUpdatedState(sendKeyboardReport)
++    val lifecycleOwner = LocalLifecycleOwner.current
++
++    fun execute(outputs: List<TrackpadGestureOutput>) {
++        commandMapper.map(outputs).forEach { command ->
++            when (command) {
++                is TrackpadGestureCommand.Mouse -> currentSendMouseInput(
++                    command.button,
++                    command.dx,
++                    command.dy,
++                    command.wheel
++                )
++                is TrackpadGestureCommand.Keyboard -> {
++                    currentSendKeyboardReport(command.press)
++                    currentSendKeyboardReport(command.release)
++                }
++                is TrackpadGestureCommand.Haptic -> {
++                    currentHapticActions.performTrackpad(command.event)
++                }
++            }
++        }
++    }
++
++    fun resetAndRelease() {
++        execute(recognizer.reset())
++        currentSendMouseInput(MouseAction.NONE, 0f, 0f, 0f)
++    }
++
++    DisposableEffect(lifecycleOwner, recognizer) {
++        val observer = LifecycleEventObserver { _, event ->
++            if (event == Lifecycle.Event.ON_STOP) {
++                resetAndRelease()
++            }
++        }
++        lifecycleOwner.lifecycle.addObserver(observer)
++
++        onDispose {
++            lifecycleOwner.lifecycle.removeObserver(observer)
++            resetAndRelease()
++        }
++    }
++
++    DefaultElevatedCard(modifier = modifier, shape = shape) {
++        Box(
++            modifier = Modifier
++                .fillMaxSize()
++                .pointerInput(recognizer, commandMapper) {
++                    awaitEachGesture {
++                        var endedCleanly = false
++                        try {
++                            awaitFirstDown(requireUnconsumed = false)
++                            currentEvent.toTrackpadTouch().let { touch ->
++                                execute(recognizer.onTouch(touch))
++                            }
++                            currentEvent.consumePressedPointers()
++
++                            while (true) {
++                                val event = awaitPointerEvent()
++                                execute(recognizer.onTouch(event.toTrackpadTouch()))
++                                event.consumePressedPointers()
++                                if (event.changes.none { it.pressed }) {
++                                    endedCleanly = true
++                                    break
++                                }
++                            }
++                        } finally {
++                            if (!endedCleanly) {
++                                resetAndRelease()
++                            }
++                        }
++                    }
++                }
++        )
++    }
++}
++
++private fun Density.gestureThresholds(): GestureThresholds = GestureThresholds(
++    tapSlop = 12.dp.toPx(),
++    scrollClaimDistance = 10.dp.toPx(),
++    swipeDistance = 40.dp.toPx(),
++    scrollStep = 6.dp.toPx()
++)
++
++private fun PointerEvent.toTrackpadTouch(): TrackpadTouch = TrackpadTouch(
++    pointers = changes
++        .asSequence()
++        .filter { it.pressed }
++        .map { change ->
++            TrackpadPointer(
++                id = change.id.value,
++                x = change.position.x,
++                y = change.position.y
++            )
++        }
++        .toList(),
++    eventTimeMillis = changes.maxOfOrNull { it.uptimeMillis } ?: 0L
++)
++
++private fun PointerEvent.consumePressedPointers() {
++    changes.forEach { change ->
++        if (change.pressed) change.consume()
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/views/mouse/MousePadLayout.kt b/app/src/main/java/com/atharok/btremote/ui/views/mouse/MousePadLayout.kt
+index a36997a..0d99533 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/views/mouse/MousePadLayout.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/views/mouse/MousePadLayout.kt
+@@ -20,6 +20,7 @@ import com.atharok.btremote.R
+ import com.atharok.btremote.common.utils.AppIcons
+ import com.atharok.btremote.common.utils.Ref
+ import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.ui.components.customButtons.EmptySurfaceButton
+ import com.atharok.btremote.ui.components.customButtons.IconHoldButton
+ 
+@@ -29,7 +30,9 @@ fun MousePadLayout(
+     scrollSpeed: Float,
+     shouldInvertMouseScrollingDirection: Boolean,
+     useGyroscope: Boolean,
++    trackpadSettings: TrackpadSettings,
+     sendMouseInput: (MouseAction, Float, Float, Float) -> Unit,
++    sendKeyboardReport: (ByteArray) -> Unit,
+     modifier: Modifier = Modifier
+ ) {
+     val mouseAction: Ref<MouseAction> = remember { Ref(MouseAction.NONE) }
+@@ -49,20 +52,13 @@ fun MousePadLayout(
+                 .weight(0.8f)
+                 .padding(bottom = dimensionResource(id = R.dimen.padding_min))
+         ) {
+-            MousePad(
++            MacTrackpad(
+                 mouseSpeed = mouseSpeed,
+                 scrollSpeed = scrollSpeed,
+-                sendMouseAction = {
+-                    mouseAction.value = it
+-                    sendMouseInput(mouseAction.value, 0f, 0f, 0f)
+-                },
+-                sendMousePosition = { x: Float, y: Float ->
+-                    sendMouseInput(mouseAction.value, x, y, 0f)
+-                },
+-                sendMouseScroll = { wheel: Float ->
+-                    val mouseWheel = wheel * if(shouldInvertMouseScrollingDirection) -1f else 1f
+-                    sendMouseInput(mouseAction.value, 0f, 0f, mouseWheel)
+-                },
++                shouldInvertMouseScrollingDirection = shouldInvertMouseScrollingDirection,
++                trackpadSettings = trackpadSettings,
++                sendMouseInput = sendMouseInput,
++                sendKeyboardReport = sendKeyboardReport,
+                 shape = RoundedCornerShape(
+                     topStart = dimensionResource(id = R.dimen.card_corner_radius),
+                     topEnd = 0.dp,
+@@ -199,4 +195,4 @@ private fun ScrollMouseButtonsLayout(
+     }
+ }
+ 
+-private fun getScrollDurationBetweenRepeats(speed: Float): Long = speed.takeIf { it > 0f }?.let { (100f / it).toLong().coerceIn(16L, 200L) } ?: 100L
+\ No newline at end of file
++private fun getScrollDurationBetweenRepeats(speed: Float): Long = speed.takeIf { it > 0f }?.let { (100f / it).toLong().coerceIn(16L, 200L) } ?: 100L
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapperTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapperTest.kt
+new file mode 100644
+index 0000000..6a5c41a
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapperTest.kt
+@@ -0,0 +1,176 @@
++package com.atharok.btremote.domain.entities.remoteInput.trackpad
++
++import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
++import org.junit.Assert.assertArrayEquals
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class TrackpadGestureCommandMapperTest {
++
++    private val mapper = TrackpadGestureCommandMapper(
++        settings = TrackpadSettings(),
++        mouseSpeed = 2f,
++        scrollSpeed = 1.5f
++    )
++
++    @Test
++    fun mapsMoveClickDragAndScrollToExistingMouseReports() {
++        assertEquals(
++            listOf(TrackpadGestureCommand.Mouse(MouseAction.NONE, 4f, -6f, 0f)),
++            mapper.map(TrackpadGestureOutput.Move(2f, -3f, dragging = false))
++        )
++        assertEquals(
++            listOf(TrackpadGestureCommand.Mouse(MouseAction.MOUSE_CLICK_LEFT, 4f, -6f, 0f)),
++            mapper.map(TrackpadGestureOutput.Move(2f, -3f, dragging = true))
++        )
++        assertEquals(
++            listOf(
++                TrackpadGestureCommand.Mouse(MouseAction.MOUSE_CLICK_LEFT, 0f, 0f, 0f),
++                TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)
++            ),
++            mapper.map(TrackpadGestureOutput.Click(MouseAction.MOUSE_CLICK_LEFT))
++        )
++        assertEquals(
++            listOf(TrackpadGestureCommand.Mouse(MouseAction.MOUSE_CLICK_LEFT, 0f, 0f, 0f)),
++            mapper.map(TrackpadGestureOutput.DragStart)
++        )
++        assertEquals(
++            listOf(TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)),
++            mapper.map(TrackpadGestureOutput.DragEnd)
++        )
++        assertEquals(
++            listOf(TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 3f)),
++            mapper.map(TrackpadGestureOutput.Scroll(2))
++        )
++    }
++
++    @Test
++    fun mapsHapticOutputWithoutTurningMovementIntoHaptics() {
++        assertEquals(
++            listOf(
++                TrackpadGestureCommand.Haptic(TrackpadHapticEvent.SCROLL)
++            ),
++            mapper.map(TrackpadGestureOutput.Haptic(TrackpadHapticEvent.SCROLL))
++        )
++        assertTrue(
++            mapper.map(TrackpadGestureOutput.Move(10f, 10f, dragging = false))
++                .none { it is TrackpadGestureCommand.Haptic }
++        )
++    }
++
++    @Test
++    fun executesEveryConfiguredChordAsPressAndReleaseReports() {
++        TrackpadGestureAction.entries.forEach { action ->
++            val commands = mapper.map(TrackpadGestureOutput.Action(action))
++            val chord = action.chord
++
++            when {
++                chord == null -> assertTrue("$action", commands.isEmpty())
++                chord.mouseButton != null -> {
++                    assertEquals("$action", 2, commands.size)
++                    assertEquals(
++                        "$action press",
++                        TrackpadGestureCommand.Mouse(chord.mouseButton, 0f, 0f, 0f),
++                        commands[0]
++                    )
++                    assertEquals(
++                        "$action release",
++                        TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f),
++                        commands[1]
++                    )
++                }
++                else -> {
++                    assertEquals("$action", 1, commands.size)
++                    val keyboard = commands.single() as TrackpadGestureCommand.Keyboard
++                    assertArrayEquals("$action press", chord.pressReport(), keyboard.press)
++                    assertArrayEquals("$action release", chord.releaseReport(), keyboard.release)
++                    assertEquals("$action report size", 8, keyboard.press.size)
++                }
++            }
++        }
++    }
++
++    @Test
++    fun middleClickUsesTheMouseReportWhileSpotlightUsesAKeyboardReport() {
++        assertEquals(
++            listOf(
++                TrackpadGestureCommand.Mouse(MouseAction.MOUSE_CLICK_MIDDLE, 0f, 0f, 0f),
++                TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)
++            ),
++            mapper.map(TrackpadGestureOutput.Action(TrackpadGestureAction.MIDDLE_CLICK))
++        )
++
++        val spotlight = mapper
++            .map(TrackpadGestureOutput.Action(TrackpadGestureAction.SPOTLIGHT))
++            .single() as TrackpadGestureCommand.Keyboard
++        assertArrayEquals(
++            byteArrayOf(0x08, 0, KeyboardKey.KEY_SPACE_BAR.byte, 0, 0, 0, 0, 0),
++            spotlight.press
++        )
++        assertArrayEquals(ByteArray(8), spotlight.release)
++    }
++
++    @Test
++    fun zoomPinchUsesCommandEqualsOrMinusByDirection() {
++        val zoomIn = mapper
++            .map(TrackpadGestureOutput.Zoom(0.2f))
++            .single() as TrackpadGestureCommand.Keyboard
++        val zoomOut = mapper
++            .map(TrackpadGestureOutput.Zoom(-0.2f))
++            .single() as TrackpadGestureCommand.Keyboard
++
++        assertArrayEquals(
++            byteArrayOf(0x08, 0, KeyboardKey.ROW_1_KEY_12.byte, 0, 0, 0, 0, 0),
++            zoomIn.press
++        )
++        assertArrayEquals(
++            byteArrayOf(0x08, 0, KeyboardKey.ROW_1_KEY_11.byte, 0, 0, 0, 0, 0),
++            zoomOut.press
++        )
++    }
++
++    @Test
++    fun configuredPinchAndRotationActionsUseTheirSelectedChords() {
++        val spotlightPinch = TrackpadGestureCommandMapper(
++            settings = TrackpadSettings(pinchAction = TrackpadGestureAction.SPOTLIGHT)
++        )
++        val pinchIn = spotlightPinch
++            .map(TrackpadGestureOutput.Zoom(0.2f))
++            .single() as TrackpadGestureCommand.Keyboard
++        val pinchOut = spotlightPinch
++            .map(TrackpadGestureOutput.Zoom(-0.2f))
++            .single() as TrackpadGestureCommand.Keyboard
++        assertArrayEquals(pinchIn.press, pinchOut.press)
++        assertArrayEquals(pinchIn.release, pinchOut.release)
++
++        val rotateByDirection = TrackpadGestureCommandMapper(
++            settings = TrackpadSettings(rotationAction = TrackpadGestureAction.ROTATE_RIGHT)
++        )
++        val rotateRight = rotateByDirection
++            .map(TrackpadGestureOutput.Rotate(0.3f))
++            .single() as TrackpadGestureCommand.Keyboard
++        val rotateLeft = rotateByDirection
++            .map(TrackpadGestureOutput.Rotate(-0.3f))
++            .single() as TrackpadGestureCommand.Keyboard
++        assertArrayEquals(TrackpadGestureAction.ROTATE_RIGHT.chord!!.pressReport(), rotateRight.press)
++        assertArrayEquals(TrackpadGestureAction.ROTATE_LEFT.chord!!.pressReport(), rotateLeft.press)
++
++        val selectedSpotlight = TrackpadGestureCommandMapper(
++            settings = TrackpadSettings(rotationAction = TrackpadGestureAction.SPOTLIGHT)
++        )
++        assertArrayEquals(
++            TrackpadGestureAction.SPOTLIGHT.chord!!.pressReport(),
++            (selectedSpotlight.map(TrackpadGestureOutput.Rotate(-0.3f))
++                .single() as TrackpadGestureCommand.Keyboard).press
++        )
++    }
++
++    @Test
++    fun noneActionAndNoneRotationProduceNoHidCommands() {
++        assertTrue(mapper.map(TrackpadGestureOutput.Action(TrackpadGestureAction.NONE)).isEmpty())
++        assertTrue(mapper.map(TrackpadGestureOutput.Rotate(0.3f)).isEmpty())
++    }
++}

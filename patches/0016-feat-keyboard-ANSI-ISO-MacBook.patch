@@ -1,0 +1,503 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 01:20:42 +0800
+Subject: [PATCH] =?UTF-8?q?feat(keyboard):=20=E7=94=9F=E6=88=90=20ANSI/ISO?=
+ =?UTF-8?q?=20MacBook=20=E9=94=AE=E4=BD=8D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 按 HID usage 而非图例或下标搬移重音/反斜杠/ISO 附加键，17 种语言逐个断言 usage 与 behavior 不丢不重
+- 六行顺序固定为功能行、数字行、QWERTY 行、ASDF 行、ZXCV 行、底部修饰键行
+- 显式赋予 Tab 1.5、Backspace 2、行尾反斜杠 1.5、Caps 1.75、Shift 2.25/1.75、Enter 2.25、Space 5、底部修饰键 1.25、右方向键 1.75
+- US 保留自身 ROW_4_KEY_00 用法且不再合成第二个 ISO 键，德语/法语保留 ISO 附加键
+- 新增 12 条工厂单元测试，全量单测 58 条通过
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactory.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactory.kt
+new file mode 100644
+index 0000000..41fb2c3
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactory.kt
+@@ -0,0 +1,89 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
++
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardLayout
++
++/**
++ * Turns a language mapping into the physical MacBook presentation.
++ *
++ * Keys are relocated by HID usage, never by legend or array index, so a language keeps all of its
++ * usages and only changes its position on screen. Weights are assigned here instead of being read
++ * from the legacy language rows.
++ */
++object MacKeyboardLayoutFactory {
++
++    fun build(layout: AdvancedKeyboardLayout): MacKeyboardLayout {
++        val line1 = layout.line1.toList()
++        val line2 = layout.line2.toList()
++        val line3 = layout.line3.toList()
++        val line4 = layout.line4.toList()
++
++        // The legacy rows keep the ANSI backslash and the ISO extra key inside the home and shift
++        // rows, so they are pulled out before the remaining characters are placed.
++        val grave = line4.firstOrNull { it.byte == KeyboardKey.ROW_1_KEY_00.byte }
++        val isoExtra = line4.firstOrNull { it.byte == KeyboardKey.ROW_4_KEY_00.byte }
++        val ansiBackslash = line3.firstOrNull { it.byte == KeyboardKey.ROW_3_KEY_11.byte }
++        val shiftRowMovedUsages = setOfNotNull(grave?.byte, isoExtra?.byte)
++        val homeRowMovedUsages = setOfNotNull(ansiBackslash?.byte)
++
++        val numberRow = buildList {
++            grave?.let { add(it.toMacKey(MacKeyboardKeyWeight.ORDINARY)) }
++            addAll(line1.map { it.toMacKey(MacKeyboardKeyWeight.ORDINARY) })
++            add(MacKeyboardSpec.backspace)
++        }
++
++        val qwertyRow = buildList {
++            add(MacKeyboardSpec.tab)
++            addAll(line2.map { it.toMacKey(MacKeyboardKeyWeight.ORDINARY) })
++            ansiBackslash?.let { add(it.toMacKey(MacKeyboardKeyWeight.ROW_BACKSLASH)) }
++        }
++
++        val homeRow = buildList {
++            add(MacKeyboardSpec.capsLock)
++            addAll(
++                line3
++                    .filterNot { it.byte in homeRowMovedUsages }
++                    .map { it.toMacKey(MacKeyboardKeyWeight.ORDINARY) }
++            )
++            add(MacKeyboardSpec.enter)
++        }
++
++        val shiftRow = buildList {
++            add(MacKeyboardSpec.shiftLeft)
++            isoExtra?.let {
++                add(it.toMacKey(MacKeyboardKeyWeight.ORDINARY, MacKeyboardKeyKind.ISO_EXTRA))
++            }
++            addAll(
++                line4
++                    .filterNot { it.byte in shiftRowMovedUsages }
++                    .map { it.toMacKey(MacKeyboardKeyWeight.ORDINARY) }
++            )
++            add(MacKeyboardSpec.upArrow)
++            add(MacKeyboardSpec.shiftRight)
++        }
++
++        return MacKeyboardLayout(
++            rows = listOf(
++                MacKeyboardSpec.functionRow,
++                MacKeyboardRow(numberRow),
++                MacKeyboardRow(qwertyRow),
++                MacKeyboardRow(homeRow),
++                MacKeyboardRow(shiftRow),
++                MacKeyboardSpec.bottomRow
++            )
++        )
++    }
++
++    private fun AdvancedKeyboardKey.toMacKey(
++        weight: Float,
++        kind: MacKeyboardKeyKind = kindOf(this)
++    ): MacKeyboardKey = MacKeyboardKey(key = withWeight(weight), kind = kind)
++
++    private fun kindOf(key: AdvancedKeyboardKey): MacKeyboardKeyKind = when (key.behavior) {
++        AdvancedKeyBehavior.CAPS_LOCK -> MacKeyboardKeyKind.CAPS_LOCK
++        AdvancedKeyBehavior.MODIFIER -> MacKeyboardKeyKind.MODIFIER
++        AdvancedKeyBehavior.KEY -> MacKeyboardKeyKind.ORDINARY
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
+new file mode 100644
+index 0000000..5561803
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
+@@ -0,0 +1,387 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
++
++import android.content.ContextWrapper
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.ArabicAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.BulgarianAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.CzechAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.EnglishUKAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.EnglishUSAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.FrenchAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.GermanAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.GreekAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.HebrewAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.PersianAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.PolishAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.PortugueseAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.PortugueseBRAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.RussianAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.SpanishAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.TurkishAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.UkrainianAdvancedKeyboardLayout
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class MacKeyboardLayoutFactoryTest {
++
++    // The factory only reads the language arrays, it never needs Android resources.
++    private val context = ContextWrapper(null)
++
++    private val englishUs = EnglishUSAdvancedKeyboardLayout(context)
++    private val englishUk = EnglishUKAdvancedKeyboardLayout(context)
++    private val spanish = SpanishAdvancedKeyboardLayout(context)
++    private val french = FrenchAdvancedKeyboardLayout(context)
++    private val german = GermanAdvancedKeyboardLayout(context)
++    private val russian = RussianAdvancedKeyboardLayout(context)
++    private val czech = CzechAdvancedKeyboardLayout(context)
++    private val polish = PolishAdvancedKeyboardLayout(context)
++    private val portuguese = PortugueseAdvancedKeyboardLayout(context)
++    private val portugueseBr = PortugueseBRAdvancedKeyboardLayout(context)
++    private val greek = GreekAdvancedKeyboardLayout(context)
++    private val turkish = TurkishAdvancedKeyboardLayout(context)
++    private val hebrew = HebrewAdvancedKeyboardLayout(context)
++    private val bulgarian = BulgarianAdvancedKeyboardLayout(context)
++    private val ukrainian = UkrainianAdvancedKeyboardLayout(context)
++    private val persian = PersianAdvancedKeyboardLayout(context)
++    private val arabic = ArabicAdvancedKeyboardLayout(context)
++
++    private val allLayouts: List<AdvancedKeyboardLayout> = listOf(
++        englishUs,
++        englishUk,
++        spanish,
++        french,
++        german,
++        russian,
++        czech,
++        polish,
++        portuguese,
++        portugueseBr,
++        greek,
++        turkish,
++        hebrew,
++        bulgarian,
++        ukrainian,
++        persian,
++        arabic
++    )
++
++    private val structuralKeys: List<MacKeyboardKey> =
++        MacKeyboardSpec.functionRow.keys +
++                listOf(
++                    MacKeyboardSpec.tab,
++                    MacKeyboardSpec.backspace,
++                    MacKeyboardSpec.capsLock,
++                    MacKeyboardSpec.enter,
++                    MacKeyboardSpec.shiftLeft,
++                    MacKeyboardSpec.shiftRight,
++                    MacKeyboardSpec.upArrow
++                ) +
++                MacKeyboardSpec.bottomRow.keys
++
++    // A modifier is a bit in the first report byte while a usage is an array entry, so a key such
++    // as F7 (0x40) legitimately shares its byte with the right Alt modifier bit.
++    private val usageOrder = compareBy<Pair<Byte, AdvancedKeyBehavior>>(
++        { it.first },
++        { it.second.ordinal }
++    )
++
++    private fun sourceUsages(layout: AdvancedKeyboardLayout): List<Byte> =
++        layout.line1.map { it.byte } +
++                layout.line2.map { it.byte } +
++                layout.line3.map { it.byte } +
++                layout.line4.map { it.byte }
++
++    @Test
++    fun buildsSixNonEmptyRowsForEveryLanguage() {
++        assertEquals(17, allLayouts.size)
++
++        allLayouts.forEach { layout ->
++            val macLayout = MacKeyboardLayoutFactory.build(layout)
++
++            assertEquals(layout.javaClass.simpleName, 6, macLayout.rows.size)
++            assertTrue(layout.javaClass.simpleName, macLayout.rows.all { it.keys.isNotEmpty() })
++        }
++    }
++
++    @Test
++    fun preservesEverySourceKeyOnceWithItsBehaviorForEveryLanguage() {
++        allLayouts.forEach { layout ->
++            val macLayout = MacKeyboardLayoutFactory.build(layout)
++            val sourceKeys = (layout.line1 + layout.line2 + layout.line3 + layout.line4).toList()
++
++            sourceKeys.forEach { sourceKey ->
++                assertEquals(
++                    "${layout.javaClass.simpleName} key ${sourceKey.byte.toInt() and 0xFF}/${sourceKey.behavior}",
++                    1,
++                    macLayout.keys.count {
++                        it.byte == sourceKey.byte && it.behavior == sourceKey.behavior
++                    }
++                )
++            }
++        }
++    }
++
++    @Test
++    fun placesSourceAndStructuralKeysExactlyOnceForEveryLanguage() {
++        allLayouts.forEach { layout ->
++            val macLayout = MacKeyboardLayoutFactory.build(layout)
++            val expected = (
++                    (layout.line1 + layout.line2 + layout.line3 + layout.line4)
++                        .map { it.byte to it.behavior } +
++                            structuralKeys.map { it.byte to it.behavior }
++                    ).sortedWith(usageOrder)
++            val actual = macLayout.keys.map { it.byte to it.behavior }.sortedWith(usageOrder)
++
++            assertEquals(layout.javaClass.simpleName, expected, actual)
++        }
++    }
++
++    @Test
++    fun keepsRowsInMacBookOrderForEnglishUs() {
++        val rows = MacKeyboardLayoutFactory.build(englishUs).rows
++
++        assertEquals(
++            listOf(
++                KeyboardKey.KEY_ESCAPE.byte,
++                KeyboardKey.KEY_F1.byte,
++                KeyboardKey.KEY_F2.byte,
++                KeyboardKey.KEY_F3.byte,
++                KeyboardKey.KEY_F4.byte,
++                KeyboardKey.KEY_F5.byte,
++                KeyboardKey.KEY_F6.byte,
++                KeyboardKey.KEY_F7.byte,
++                KeyboardKey.KEY_F8.byte,
++                KeyboardKey.KEY_F9.byte,
++                KeyboardKey.KEY_F10.byte,
++                KeyboardKey.KEY_F11.byte,
++                KeyboardKey.KEY_F12.byte,
++                KeyboardKey.KEY_PRINT_SCREEN.byte,
++                KeyboardKey.KEY_DELETE_FORWARD.byte
++            ),
++            rows[0].keys.map { it.byte }
++        )
++        assertEquals(
++            listOf(
++                KeyboardKey.ROW_1_KEY_00.byte,
++                KeyboardKey.ROW_1_KEY_01.byte,
++                KeyboardKey.ROW_1_KEY_02.byte,
++                KeyboardKey.ROW_1_KEY_03.byte,
++                KeyboardKey.ROW_1_KEY_04.byte,
++                KeyboardKey.ROW_1_KEY_05.byte,
++                KeyboardKey.ROW_1_KEY_06.byte,
++                KeyboardKey.ROW_1_KEY_07.byte,
++                KeyboardKey.ROW_1_KEY_08.byte,
++                KeyboardKey.ROW_1_KEY_09.byte,
++                KeyboardKey.ROW_1_KEY_10.byte,
++                KeyboardKey.ROW_1_KEY_11.byte,
++                KeyboardKey.ROW_1_KEY_12.byte,
++                KeyboardKey.KEY_DELETE.byte
++            ),
++            rows[1].keys.map { it.byte }
++        )
++        assertEquals(
++            listOf(
++                KeyboardKey.KEY_TAB.byte,
++                KeyboardKey.ROW_2_KEY_00.byte,
++                KeyboardKey.ROW_2_KEY_01.byte,
++                KeyboardKey.ROW_2_KEY_02.byte,
++                KeyboardKey.ROW_2_KEY_03.byte,
++                KeyboardKey.ROW_2_KEY_04.byte,
++                KeyboardKey.ROW_2_KEY_05.byte,
++                KeyboardKey.ROW_2_KEY_06.byte,
++                KeyboardKey.ROW_2_KEY_07.byte,
++                KeyboardKey.ROW_2_KEY_08.byte,
++                KeyboardKey.ROW_2_KEY_09.byte,
++                KeyboardKey.ROW_2_KEY_10.byte,
++                KeyboardKey.ROW_2_KEY_11.byte,
++                KeyboardKey.ROW_3_KEY_11.byte
++            ),
++            rows[2].keys.map { it.byte }
++        )
++        assertEquals(
++            listOf(
++                KeyboardKey.KEY_CAPS_LOCK.byte,
++                KeyboardKey.ROW_3_KEY_00.byte,
++                KeyboardKey.ROW_3_KEY_01.byte,
++                KeyboardKey.ROW_3_KEY_02.byte,
++                KeyboardKey.ROW_3_KEY_03.byte,
++                KeyboardKey.ROW_3_KEY_04.byte,
++                KeyboardKey.ROW_3_KEY_05.byte,
++                KeyboardKey.ROW_3_KEY_06.byte,
++                KeyboardKey.ROW_3_KEY_07.byte,
++                KeyboardKey.ROW_3_KEY_08.byte,
++                KeyboardKey.ROW_3_KEY_09.byte,
++                KeyboardKey.ROW_3_KEY_10.byte,
++                KeyboardKey.KEY_ENTER.byte
++            ),
++            rows[3].keys.map { it.byte }
++        )
++        assertEquals(
++            listOf(
++                KeyboardKey.KEY_SHIFT_LEFT.byte,
++                KeyboardKey.ROW_4_KEY_00.byte,
++                KeyboardKey.ROW_4_KEY_01.byte,
++                KeyboardKey.ROW_4_KEY_02.byte,
++                KeyboardKey.ROW_4_KEY_03.byte,
++                KeyboardKey.ROW_4_KEY_04.byte,
++                KeyboardKey.ROW_4_KEY_05.byte,
++                KeyboardKey.ROW_4_KEY_06.byte,
++                KeyboardKey.ROW_4_KEY_07.byte,
++                KeyboardKey.ROW_4_KEY_08.byte,
++                KeyboardKey.ROW_4_KEY_09.byte,
++                KeyboardKey.ROW_4_KEY_10.byte,
++                KeyboardKey.KEY_UP_ARROW.byte,
++                KeyboardKey.KEY_SHIFT_RIGHT.byte
++            ),
++            rows[4].keys.map { it.byte }
++        )
++        assertEquals(
++            listOf(
++                KeyboardKey.KEY_CTRL_LEFT.byte,
++                KeyboardKey.KEY_ALT.byte,
++                KeyboardKey.KEY_META_LEFT.byte,
++                KeyboardKey.KEY_SPACE_BAR.byte,
++                KeyboardKey.KEY_META_RIGHT.byte,
++                KeyboardKey.KEY_ALT_GR.byte,
++                KeyboardKey.KEY_CTRL_RIGHT.byte,
++                KeyboardKey.KEY_LEFT_ARROW.byte,
++                KeyboardKey.KEY_DOWN_ARROW.byte,
++                KeyboardKey.KEY_RIGHT_ARROW.byte
++            ),
++            rows[5].keys.map { it.byte }
++        )
++    }
++
++    @Test
++    fun reportsExplicitRowWeights() {
++        val rows = MacKeyboardLayoutFactory.build(englishUs).rows
++
++        assertEquals(
++            listOf(15f, 15f, 15f, 15f, 16f, 16.25f),
++            rows.map { it.totalWeight }
++        )
++    }
++
++    @Test
++    fun appliesStructuralWeightsToTheMovedKeys() {
++        val rows = MacKeyboardLayoutFactory.build(englishUs).rows
++
++        assertEquals(MacKeyboardKeyWeight.CAPS_LOCK, rows[3].keys.first().weight)
++        assertEquals(MacKeyboardKeyWeight.ENTER, rows[3].keys.last().weight)
++        assertEquals(MacKeyboardKeyWeight.SHIFT_LEFT, rows[4].keys.first().weight)
++        assertEquals(MacKeyboardKeyWeight.SHIFT_RIGHT, rows[4].keys.last().weight)
++        assertEquals(MacKeyboardKeyWeight.TAB, rows[2].keys.first().weight)
++        assertEquals(MacKeyboardKeyWeight.ROW_BACKSLASH, rows[2].keys.last().weight)
++        assertEquals(MacKeyboardKeyWeight.BACKSPACE, rows[1].keys.last().weight)
++        assertEquals(MacKeyboardKeyWeight.SPACE, rows[5].keys[3].weight)
++        assertTrue(rows[1].keys.drop(1).dropLast(1).all { it.weight == MacKeyboardKeyWeight.ORDINARY })
++        assertTrue(rows[2].keys.drop(1).dropLast(1).all { it.weight == MacKeyboardKeyWeight.ORDINARY })
++        assertTrue(rows[3].keys.drop(1).dropLast(1).all { it.weight == MacKeyboardKeyWeight.ORDINARY })
++        assertTrue(rows[4].keys.drop(2).dropLast(2).all { it.weight == MacKeyboardKeyWeight.ORDINARY })
++    }
++
++    @Test
++    fun keepsCapsLockAndModifiersOnTheirMacBookRows() {
++        allLayouts.forEach { layout ->
++            val macLayout = MacKeyboardLayoutFactory.build(layout)
++            val capsLock = macLayout.rows[3].keys.first()
++
++            assertEquals(MacKeyboardKeyKind.CAPS_LOCK, capsLock.kind)
++            assertEquals(AdvancedKeyBehavior.CAPS_LOCK, capsLock.behavior)
++            assertEquals(KeyboardKey.KEY_CAPS_LOCK.byte, capsLock.byte)
++
++            val leftShift = macLayout.rows[4].keys.first()
++            assertEquals(MacKeyboardKeyKind.MODIFIER, leftShift.kind)
++            assertEquals(KeyboardKey.KEY_SHIFT_LEFT.byte, leftShift.byte)
++
++            val rightShift = macLayout.rows[4].keys.last()
++            assertEquals(MacKeyboardKeyKind.MODIFIER, rightShift.kind)
++            assertEquals(KeyboardKey.KEY_SHIFT_RIGHT.byte, rightShift.byte)
++
++            assertEquals(
++                listOf(
++                    KeyboardKey.KEY_CTRL_LEFT.byte,
++                    KeyboardKey.KEY_ALT.byte,
++                    KeyboardKey.KEY_META_LEFT.byte,
++                    KeyboardKey.KEY_META_RIGHT.byte,
++                    KeyboardKey.KEY_ALT_GR.byte,
++                    KeyboardKey.KEY_CTRL_RIGHT.byte
++                ),
++                macLayout.rows[5].keys
++                    .filter { it.kind == MacKeyboardKeyKind.MODIFIER }
++                    .map { it.byte }
++            )
++        }
++    }
++
++    @Test
++    fun movesGraveAndAnsiBackslashOutOfTheLegacyRows() {
++        allLayouts.forEach { layout ->
++            val macLayout = MacKeyboardLayoutFactory.build(layout)
++
++            assertEquals(KeyboardKey.ROW_1_KEY_00.byte, macLayout.rows[1].keys.first().byte)
++            assertEquals(
++                KeyboardKey.ROW_3_KEY_11.byte,
++                macLayout.rows[2].keys.last().byte
++            )
++            assertTrue(macLayout.rows[3].keys.none { it.byte == KeyboardKey.ROW_3_KEY_11.byte })
++            assertTrue(macLayout.rows.drop(1).all { row -> row.keys.none { it.byte == KeyboardKey.ROW_1_KEY_00.byte && row !== macLayout.rows[1] } })
++        }
++    }
++
++    @Test
++    fun insertsTheIsoExtraKeyAfterLeftShift() {
++        val macLayout = MacKeyboardLayoutFactory.build(german)
++        val isoKey = macLayout.rows[4].keys[1]
++
++        assertEquals(KeyboardKey.ROW_4_KEY_00.byte, isoKey.byte)
++        assertEquals(MacKeyboardKeyKind.ISO_EXTRA, isoKey.kind)
++        assertEquals(MacKeyboardKeyWeight.ORDINARY, isoKey.weight)
++    }
++
++    @Test
++    fun frenchAndGermanRetainTheIsoExtraKey() {
++        listOf(french, german).forEach { layout ->
++            assertEquals(
++                layout.javaClass.simpleName,
++                listOf(KeyboardKey.ROW_4_KEY_00.byte),
++                MacKeyboardLayoutFactory.build(layout)
++                    .keys
++                    .filter { it.kind == MacKeyboardKeyKind.ISO_EXTRA }
++                    .map { it.byte }
++            )
++        }
++    }
++
++    @Test
++    fun englishUsKeepsItsOwnIsoUsageWithoutGainingASecondOne() {
++        val sourceIsoCount = sourceUsages(englishUs).count { it == KeyboardKey.ROW_4_KEY_00.byte }
++        val macLayout = MacKeyboardLayoutFactory.build(englishUs)
++
++        // The locale data already maps ROW_4_KEY_00 for US, so the strict ANSI rule must not
++        // synthesise another ISO key and must not drop the existing usage either.
++        assertEquals(1, sourceIsoCount)
++        assertEquals(sourceIsoCount, macLayout.keys.count { it.byte == KeyboardKey.ROW_4_KEY_00.byte })
++        assertEquals(1, macLayout.keys.count { it.kind == MacKeyboardKeyKind.ISO_EXTRA })
++    }
++
++    @Test
++    fun keepsEveryLanguageCharacterLegend() {
++        allLayouts.forEach { layout ->
++            val macLayout = MacKeyboardLayoutFactory.build(layout)
++            val sourceKeys = (layout.line1 + layout.line2 + layout.line3 + layout.line4).toList()
++
++            sourceKeys.forEach { sourceKey ->
++                val builtKey = macLayout.keys.first { it.byte == sourceKey.byte }
++                assertEquals(
++                    "${layout.javaClass.simpleName} legend of ${sourceKey.byte.toInt() and 0xFF}",
++                    sourceKey,
++                    builtKey.key.withWeight(sourceKey.weight)
++                )
++            }
++        }
++    }
++}

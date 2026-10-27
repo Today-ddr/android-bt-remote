@@ -1,0 +1,516 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 01:17:06 +0800
+Subject: [PATCH] =?UTF-8?q?feat(keyboard):=20=E5=BB=BA=E7=AB=8B=20MacBook?=
+ =?UTF-8?q?=20=E5=85=AD=E8=A1=8C=E9=94=AE=E7=9B=98=E6=A8=A1=E5=9E=8B?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 新增 MacKeyboardLayout/Row/Key 不可变模型与 ORDINARY/CAPS_LOCK/MODIFIER/ISO_EXTRA 键位类型
+- 固化 F 行与底部修饰键行，显式给出 Caps 1.75、Shift 2.25/1.75、Enter 2.25、Space 5 等权重
+- 新增 ResourceTextAdvancedKeyboardKey 以资源 id 承载本地化图例，避免模型依赖 Context
+- 补充 KEY_DELETE_FORWARD(0x4C) 支持 F 行 Delete，并保留左右 Shift/Ctrl/Cmd/Alt/Alt Gr 全部用法
+- 新增 7 条模型单元测试
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardKey.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardKey.kt
+index 18f8865..a34697f 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardKey.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardKey.kt
+@@ -69,6 +69,7 @@ enum class KeyboardKey(val byte: Byte) {
+     KEY_ENTER(0x28),
+     KEY_ESCAPE(0x29),
+     KEY_DELETE(0x2A),
++    KEY_DELETE_FORWARD(0x4C),
+     KEY_TAB(0x2B),
+     KEY_SPACE_BAR(0x2C),
+     KEY_RIGHT_ARROW(0x4F),
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt
+index 2f6cdaa..0ca91d1 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt
+@@ -1,5 +1,6 @@
+ package com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard
+ 
++import androidx.annotation.StringRes
+ import androidx.compose.runtime.Composable
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.graphics.Shape
+@@ -92,6 +93,38 @@ data class TextAdvancedKeyboardKey(
+     }
+ }
+ 
++/**
++ * Text key whose legend is a string resource. It resolves its label while rendering so the
++ * layout model can stay free of Android resources and be built inside unit tests.
++ */
++data class ResourceTextAdvancedKeyboardKey(
++    override val byte: Byte,
++    override val weight: Float,
++    @param:StringRes val textRes: Int,
++    val textAlign: TextAlign = TextAlign.Center,
++    override val behavior: AdvancedKeyBehavior = AdvancedKeyBehavior.KEY
++): AdvancedKeyboardKey() {
++
++    @Composable
++    override fun KeyboardKeyView(
++        touchDown: (Byte) -> Unit,
++        touchUp: (Byte) -> Unit,
++        modifier: Modifier,
++        shape: Shape,
++        elevation: Dp
++    ) {
++        TextKeyboardKey(
++            text = stringResource(textRes),
++            touchDown = { touchDown(byte) },
++            touchUp = { touchUp(byte) },
++            modifier = modifier,
++            shape = shape,
++            elevation = elevation,
++            textAlign = textAlign
++        )
++    }
++}
++
+ data class CapsLockAdvancedKeyboardKey(
+     override val weight: Float,
+     val text: String
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayout.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayout.kt
+new file mode 100644
+index 0000000..0fb4b8a
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayout.kt
+@@ -0,0 +1,247 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
++
++import androidx.compose.ui.text.style.TextAlign
++import com.atharok.btremote.R
++import com.atharok.btremote.domain.entities.remoteInput.RemoteButtonProperties
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.CapsLockAdvancedKeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.CharacterAdvancedKeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.IconAdvancedKeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.ResourceTextAdvancedKeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.TextAdvancedKeyboardKey
++
++/**
++ * Physical role of a key inside the MacBook presentation. The role is independent from the
++ * HID usage byte and from the legend so the factory can relocate a usage without touching it.
++ */
++enum class MacKeyboardKeyKind {
++    ORDINARY,
++    CAPS_LOCK,
++    MODIFIER,
++    ISO_EXTRA
++}
++
++data class MacKeyboardKey(
++    val key: AdvancedKeyboardKey,
++    val kind: MacKeyboardKeyKind
++) {
++    val byte: Byte get() = key.byte
++    val weight: Float get() = key.weight
++    val behavior: AdvancedKeyBehavior get() = key.behavior
++}
++
++data class MacKeyboardRow(val keys: List<MacKeyboardKey>) {
++    val totalWeight: Float get() = keys.sumOf { it.weight.toDouble() }.toFloat()
++}
++
++data class MacKeyboardLayout(val rows: List<MacKeyboardRow>) {
++    val keys: List<MacKeyboardKey> get() = rows.flatMap { it.keys }
++}
++
++/** Structural key widths of the MacBook presentation, expressed in key units. */
++object MacKeyboardKeyWeight {
++    const val ORDINARY = 1f
++    const val TAB = 1.5f
++    const val BACKSPACE = 2f
++    const val ROW_BACKSLASH = 1.5f
++    const val CAPS_LOCK = 1.75f
++    const val SHIFT_LEFT = 2.25f
++    const val SHIFT_RIGHT = 1.75f
++    const val ENTER = 2.25f
++    const val SPACE = 5f
++    const val BOTTOM_MODIFIER = 1.25f
++    const val ARROW_LEFT = 1f
++    const val ARROW_DOWN = 1f
++    const val ARROW_RIGHT = 1.75f
++}
++
++/**
++ * Language independent part of the MacBook layout: the function row, the bottom modifier row and
++ * the structural keys the factory interleaves with the language legends of each
++ * [com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardLayout].
++ */
++object MacKeyboardSpec {
++
++    private fun textKey(byte: Byte, text: String, weight: Float = MacKeyboardKeyWeight.ORDINARY) =
++        MacKeyboardKey(
++            key = TextAdvancedKeyboardKey(byte = byte, weight = weight, text = text),
++            kind = MacKeyboardKeyKind.ORDINARY
++        )
++
++    private fun resourceKey(
++        byte: Byte,
++        textRes: Int,
++        weight: Float,
++        textAlign: TextAlign = TextAlign.Center,
++        behavior: AdvancedKeyBehavior = AdvancedKeyBehavior.KEY,
++        kind: MacKeyboardKeyKind = MacKeyboardKeyKind.ORDINARY
++    ) = MacKeyboardKey(
++        key = ResourceTextAdvancedKeyboardKey(
++            byte = byte,
++            weight = weight,
++            textRes = textRes,
++            textAlign = textAlign,
++            behavior = behavior
++        ),
++        kind = kind
++    )
++
++    private fun modifierKey(byte: Byte, textRes: Int, textAlign: TextAlign, weight: Float) =
++        resourceKey(
++            byte = byte,
++            textRes = textRes,
++            weight = weight,
++            textAlign = textAlign,
++            behavior = AdvancedKeyBehavior.MODIFIER,
++            kind = MacKeyboardKeyKind.MODIFIER
++        )
++
++    private fun iconKey(properties: RemoteButtonProperties, weight: Float) =
++        MacKeyboardKey(
++            key = IconAdvancedKeyboardKey(properties = properties, weight = weight),
++            kind = MacKeyboardKeyKind.ORDINARY
++        )
++
++    private val escape = resourceKey(KeyboardKey.KEY_ESCAPE.byte, R.string.escape, MacKeyboardKeyWeight.ORDINARY)
++
++    private val functionKeys: List<MacKeyboardKey> = listOf(
++        KeyboardKey.KEY_F1 to "F1",
++        KeyboardKey.KEY_F2 to "F2",
++        KeyboardKey.KEY_F3 to "F3",
++        KeyboardKey.KEY_F4 to "F4",
++        KeyboardKey.KEY_F5 to "F5",
++        KeyboardKey.KEY_F6 to "F6",
++        KeyboardKey.KEY_F7 to "F7",
++        KeyboardKey.KEY_F8 to "F8",
++        KeyboardKey.KEY_F9 to "F9",
++        KeyboardKey.KEY_F10 to "F10",
++        KeyboardKey.KEY_F11 to "F11",
++        KeyboardKey.KEY_F12 to "F12"
++    ).map { (key, legend) -> textKey(key.byte, legend) }
++
++    private val printScreen = iconKey(
++        properties = RemoteButtonProperties.KeyboardPrintScreenButton,
++        weight = MacKeyboardKeyWeight.ORDINARY
++    )
++
++    /** Forward delete. MacBook keyboards expose it on the function row, next to Print Screen. */
++    private val deleteForward = textKey(KeyboardKey.KEY_DELETE_FORWARD.byte, "Del")
++
++    val functionRow = MacKeyboardRow(listOf(escape) + functionKeys + listOf(printScreen, deleteForward))
++
++    val tab = iconKey(RemoteButtonProperties.KeyboardTabButton, MacKeyboardKeyWeight.TAB)
++
++    val backspace = iconKey(RemoteButtonProperties.KeyboardBackspaceButton, MacKeyboardKeyWeight.BACKSPACE)
++
++    val capsLock = MacKeyboardKey(
++        key = ResourceTextAdvancedKeyboardKey(
++            byte = KeyboardKey.KEY_CAPS_LOCK.byte,
++            weight = MacKeyboardKeyWeight.CAPS_LOCK,
++            textRes = R.string.caps_lock,
++            textAlign = TextAlign.Start,
++            behavior = AdvancedKeyBehavior.CAPS_LOCK
++        ),
++        kind = MacKeyboardKeyKind.CAPS_LOCK
++    )
++
++    val enter = iconKey(RemoteButtonProperties.KeyboardEnterButton, MacKeyboardKeyWeight.ENTER)
++
++    val shiftLeft = modifierKey(
++        byte = KeyboardKey.KEY_SHIFT_LEFT.byte,
++        textRes = R.string.shift,
++        textAlign = TextAlign.Start,
++        weight = MacKeyboardKeyWeight.SHIFT_LEFT
++    )
++
++    val shiftRight = modifierKey(
++        byte = KeyboardKey.KEY_SHIFT_RIGHT.byte,
++        textRes = R.string.shift,
++        textAlign = TextAlign.End,
++        weight = MacKeyboardKeyWeight.SHIFT_RIGHT
++    )
++
++    val upArrow = iconKey(RemoteButtonProperties.KeyboardUpButton, MacKeyboardKeyWeight.ORDINARY)
++
++    val leftArrow = iconKey(RemoteButtonProperties.KeyboardLeftButton, MacKeyboardKeyWeight.ARROW_LEFT)
++
++    val downArrow = iconKey(RemoteButtonProperties.KeyboardDownButton, MacKeyboardKeyWeight.ARROW_DOWN)
++
++    val rightArrow = iconKey(RemoteButtonProperties.KeyboardRightButton, MacKeyboardKeyWeight.ARROW_RIGHT)
++
++    val controlLeft = modifierKey(
++        byte = KeyboardKey.KEY_CTRL_LEFT.byte,
++        textRes = R.string.ctrl,
++        textAlign = TextAlign.Start,
++        weight = MacKeyboardKeyWeight.BOTTOM_MODIFIER
++    )
++
++    val optionLeft = modifierKey(
++        byte = KeyboardKey.KEY_ALT.byte,
++        textRes = R.string.alt,
++        textAlign = TextAlign.Start,
++        weight = MacKeyboardKeyWeight.BOTTOM_MODIFIER
++    )
++
++    val commandLeft = modifierKey(
++        byte = KeyboardKey.KEY_META_LEFT.byte,
++        textRes = R.string.meta,
++        textAlign = TextAlign.Start,
++        weight = MacKeyboardKeyWeight.BOTTOM_MODIFIER
++    )
++
++    val space = iconKey(RemoteButtonProperties.KeyboardSpaceBarButton, MacKeyboardKeyWeight.SPACE)
++
++    val commandRight = modifierKey(
++        byte = KeyboardKey.KEY_META_RIGHT.byte,
++        textRes = R.string.meta,
++        textAlign = TextAlign.End,
++        weight = MacKeyboardKeyWeight.BOTTOM_MODIFIER
++    )
++
++    /** Right Option. It keeps the Alt Gr usage so ISO layouts never lose that modifier. */
++    val optionRight = modifierKey(
++        byte = KeyboardKey.KEY_ALT_GR.byte,
++        textRes = R.string.alt_gr,
++        textAlign = TextAlign.End,
++        weight = MacKeyboardKeyWeight.BOTTOM_MODIFIER
++    )
++
++    /** Right Control, kept from the previous keyboard so no modifier usage disappears. */
++    val controlRight = modifierKey(
++        byte = KeyboardKey.KEY_CTRL_RIGHT.byte,
++        textRes = R.string.ctrl,
++        textAlign = TextAlign.End,
++        weight = MacKeyboardKeyWeight.BOTTOM_MODIFIER
++    )
++
++    val bottomRow = MacKeyboardRow(
++        listOf(
++            controlLeft,
++            optionLeft,
++            commandLeft,
++            space,
++            commandRight,
++            optionRight,
++            controlRight,
++            leftArrow,
++            downArrow,
++            rightArrow
++        )
++    )
++}
++
++/**
++ * Returns a copy of this key with the width required by its position in the MacBook layout, so a
++ * usage can move between rows without dragging the width of its original row along.
++ */
++fun MacKeyboardKey.withWeight(weight: Float): MacKeyboardKey = copy(key = key.withWeight(weight))
++
++internal fun AdvancedKeyboardKey.withWeight(weight: Float): AdvancedKeyboardKey = when (this) {
++    is CharacterAdvancedKeyboardKey -> copy(weight = weight)
++    is ResourceTextAdvancedKeyboardKey -> copy(weight = weight)
++    is TextAdvancedKeyboardKey -> copy(weight = weight)
++    is CapsLockAdvancedKeyboardKey -> copy(weight = weight)
++    is IconAdvancedKeyboardKey -> copy(weight = weight)
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt
+new file mode 100644
+index 0000000..cb4f958
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt
+@@ -0,0 +1,180 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
++
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.TextAdvancedKeyboardKey
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class MacKeyboardLayoutTest {
++
++    private fun key(
++        byte: Byte,
++        weight: Float = 1f,
++        kind: MacKeyboardKeyKind = MacKeyboardKeyKind.ORDINARY,
++        behavior: AdvancedKeyBehavior = AdvancedKeyBehavior.KEY
++    ): MacKeyboardKey = MacKeyboardKey(
++        key = TextAdvancedKeyboardKey(
++            byte = byte,
++            weight = weight,
++            text = "L",
++            behavior = behavior
++        ),
++        kind = kind
++    )
++
++    @Test
++    fun layoutKeepsSixOrderedRows() {
++        val layout = MacKeyboardLayout(
++            rows = listOf(
++                MacKeyboardRow(listOf(key(KeyboardKey.KEY_ESCAPE.byte))),
++                MacKeyboardRow(listOf(key(KeyboardKey.ROW_1_KEY_01.byte))),
++                MacKeyboardRow(listOf(key(KeyboardKey.ROW_2_KEY_00.byte))),
++                MacKeyboardRow(listOf(key(KeyboardKey.ROW_3_KEY_00.byte))),
++                MacKeyboardRow(listOf(key(KeyboardKey.ROW_4_KEY_01.byte))),
++                MacKeyboardRow(listOf(key(KeyboardKey.KEY_SPACE_BAR.byte)))
++            )
++        )
++
++        assertEquals(6, layout.rows.size)
++        assertEquals(
++            listOf(
++                KeyboardKey.KEY_ESCAPE.byte,
++                KeyboardKey.ROW_1_KEY_01.byte,
++                KeyboardKey.ROW_2_KEY_00.byte,
++                KeyboardKey.ROW_3_KEY_00.byte,
++                KeyboardKey.ROW_4_KEY_01.byte,
++                KeyboardKey.KEY_SPACE_BAR.byte
++            ),
++            layout.keys.map { it.byte }
++        )
++    }
++
++    @Test
++    fun rowKeepsKeyOrderAndSumsExplicitWeights() {
++        val row = MacKeyboardRow(
++            listOf(
++                key(KeyboardKey.ROW_3_KEY_11.byte, 2.25f),
++                key(KeyboardKey.ROW_4_KEY_01.byte),
++                key(KeyboardKey.KEY_SHIFT_RIGHT.byte, 1.75f)
++            )
++        )
++
++        assertEquals(
++            listOf(
++                KeyboardKey.ROW_3_KEY_11.byte,
++                KeyboardKey.ROW_4_KEY_01.byte,
++                KeyboardKey.KEY_SHIFT_RIGHT.byte
++            ),
++            row.keys.map { it.byte }
++        )
++        assertEquals(5f, row.totalWeight, 0.001f)
++    }
++
++    @Test
++    fun keyExposesUsageByteWeightKindAndBehavior() {
++        val modifier = key(
++            byte = KeyboardKey.KEY_CTRL_LEFT.byte,
++            weight = 1.25f,
++            kind = MacKeyboardKeyKind.MODIFIER,
++            behavior = AdvancedKeyBehavior.MODIFIER
++        )
++
++        assertEquals(KeyboardKey.KEY_CTRL_LEFT.byte, modifier.byte)
++        assertEquals(1.25f, modifier.weight, 0.001f)
++        assertEquals(MacKeyboardKeyKind.MODIFIER, modifier.kind)
++        assertEquals(AdvancedKeyBehavior.MODIFIER, modifier.behavior)
++    }
++
++    @Test
++    fun functionRowIsEscF1ToF12PrintScreenAndDelete() {
++        val row = MacKeyboardSpec.functionRow
++
++        assertEquals(
++            listOf(
++                KeyboardKey.KEY_ESCAPE.byte,
++                KeyboardKey.KEY_F1.byte,
++                KeyboardKey.KEY_F2.byte,
++                KeyboardKey.KEY_F3.byte,
++                KeyboardKey.KEY_F4.byte,
++                KeyboardKey.KEY_F5.byte,
++                KeyboardKey.KEY_F6.byte,
++                KeyboardKey.KEY_F7.byte,
++                KeyboardKey.KEY_F8.byte,
++                KeyboardKey.KEY_F9.byte,
++                KeyboardKey.KEY_F10.byte,
++                KeyboardKey.KEY_F11.byte,
++                KeyboardKey.KEY_F12.byte,
++                KeyboardKey.KEY_PRINT_SCREEN.byte,
++                KeyboardKey.KEY_DELETE_FORWARD.byte
++            ),
++            row.keys.map { it.byte }
++        )
++        assertEquals(15, row.keys.size)
++        assertEquals(15f, row.totalWeight, 0.001f)
++        assertEquals(
++            List(15) { 1f },
++            row.keys.map { it.weight }
++        )
++    }
++
++    @Test
++    fun functionRowAndEscapeStayOrdinaryKeys() {
++        val row = MacKeyboardSpec.functionRow
++
++        assertTrue(row.keys.all { it.behavior == AdvancedKeyBehavior.KEY })
++        assertTrue(row.keys.all { it.kind == MacKeyboardKeyKind.ORDINARY })
++    }
++
++    @Test
++    fun bottomRowIsTheFixedModifierRow() {
++        val row = MacKeyboardSpec.bottomRow
++
++        assertEquals(
++            listOf(
++                KeyboardKey.KEY_CTRL_LEFT.byte,
++                KeyboardKey.KEY_ALT.byte,
++                KeyboardKey.KEY_META_LEFT.byte,
++                KeyboardKey.KEY_SPACE_BAR.byte,
++                KeyboardKey.KEY_META_RIGHT.byte,
++                KeyboardKey.KEY_ALT_GR.byte,
++                KeyboardKey.KEY_CTRL_RIGHT.byte,
++                KeyboardKey.KEY_LEFT_ARROW.byte,
++                KeyboardKey.KEY_DOWN_ARROW.byte,
++                KeyboardKey.KEY_RIGHT_ARROW.byte
++            ),
++            row.keys.map { it.byte }
++        )
++        assertEquals(
++            listOf(1.25f, 1.25f, 1.25f, 5f, 1.25f, 1.25f, 1.25f, 1f, 1f, 1.75f),
++            row.keys.map { it.weight }
++        )
++    }
++
++    @Test
++    fun bottomRowKeepsEveryLegacyModifierUsage() {
++        val row = MacKeyboardSpec.bottomRow
++        val modifierBytes = row.keys
++            .filter { it.kind == MacKeyboardKeyKind.MODIFIER }
++            .map { it.behavior }
++
++        assertTrue(modifierBytes.isNotEmpty())
++        assertTrue(modifierBytes.all { it == AdvancedKeyBehavior.MODIFIER })
++        assertEquals(
++            listOf(
++                KeyboardKey.KEY_CTRL_LEFT.byte,
++                KeyboardKey.KEY_ALT.byte,
++                KeyboardKey.KEY_META_LEFT.byte,
++                KeyboardKey.KEY_META_RIGHT.byte,
++                KeyboardKey.KEY_ALT_GR.byte,
++                KeyboardKey.KEY_CTRL_RIGHT.byte
++            ),
++            row.keys.filter { it.kind == MacKeyboardKeyKind.MODIFIER }.map { it.byte }
++        )
++        assertEquals(
++            listOf(AdvancedKeyBehavior.KEY, AdvancedKeyBehavior.KEY, AdvancedKeyBehavior.KEY, AdvancedKeyBehavior.KEY),
++            row.keys.filter { it.kind == MacKeyboardKeyKind.ORDINARY }.map { it.behavior }
++        )
++    }
++}

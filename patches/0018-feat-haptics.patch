@@ -1,0 +1,491 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 01:27:16 +0800
+Subject: [PATCH] =?UTF-8?q?feat(haptics):=20=E5=A2=9E=E5=8A=A0=E5=88=86?=
+ =?UTF-8?q?=E7=BB=84=E6=8C=AF=E5=8A=A8=E7=AD=96=E7=95=A5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 持久化主开关、触控板、滚动、键盘和强度设置
+- 统一默认开启与强档振幅策略
+- 覆盖分组门控与 40ms 滚动限流
+
+diff --git a/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt b/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt
+index 015e587..09c2e26 100644
+--- a/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt
++++ b/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt
+@@ -31,6 +31,8 @@ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguag
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
+ import com.atharok.btremote.domain.entities.settings.ConnectionSettings
++import com.atharok.btremote.domain.entities.settings.HapticIntensity
++import com.atharok.btremote.domain.entities.settings.HapticSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
+ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+@@ -76,6 +78,11 @@ class SettingsDataStore(private val context: Context) {
+         private const val TRACKPAD_FOUR_FINGER_SWIPE_LEFT_KEY = "trackpad_four_finger_swipe_left_key"
+         private const val TRACKPAD_FOUR_FINGER_SWIPE_RIGHT_KEY = "trackpad_four_finger_swipe_right_key"
+         private const val TRACKPAD_FOUR_FINGER_TAP_KEY = "trackpad_four_finger_tap_key"
++        private const val HAPTICS_ENABLED_KEY = "haptics_enabled_key"
++        private const val HAPTICS_TRACKPAD_KEY = "haptics_trackpad_key"
++        private const val HAPTICS_SCROLL_KEY = "haptics_scroll_key"
++        private const val HAPTICS_KEYBOARD_KEY = "haptics_keyboard_key"
++        private const val HAPTICS_INTENSITY_KEY = "haptics_intensity_key"
+ 
+         private const val FAVORITE_DEVICES_KEY = "favorite_devices_key"
+         private const val AUTO_CONNECT_DEVICE_ADDRESS_KEY = "auto_connect_device_address_key"
+@@ -116,6 +123,11 @@ class SettingsDataStore(private val context: Context) {
+     private val trackpadFourFingerSwipeLeftKey = stringPreferencesKey(TRACKPAD_FOUR_FINGER_SWIPE_LEFT_KEY)
+     private val trackpadFourFingerSwipeRightKey = stringPreferencesKey(TRACKPAD_FOUR_FINGER_SWIPE_RIGHT_KEY)
+     private val trackpadFourFingerTapKey = stringPreferencesKey(TRACKPAD_FOUR_FINGER_TAP_KEY)
++    private val hapticsEnabledKey = booleanPreferencesKey(HAPTICS_ENABLED_KEY)
++    private val hapticsTrackpadKey = booleanPreferencesKey(HAPTICS_TRACKPAD_KEY)
++    private val hapticsScrollKey = booleanPreferencesKey(HAPTICS_SCROLL_KEY)
++    private val hapticsKeyboardKey = booleanPreferencesKey(HAPTICS_KEYBOARD_KEY)
++    private val hapticsIntensityKey = stringPreferencesKey(HAPTICS_INTENSITY_KEY)
+     private val favoriteDevicesKey = stringPreferencesKey(FAVORITE_DEVICES_KEY)
+     private val autoConnectDeviceAddressKey = stringPreferencesKey(AUTO_CONNECT_DEVICE_ADDRESS_KEY)
+     private val autoConnectPausedKey = booleanPreferencesKey(AUTO_CONNECT_PAUSED_KEY)
+@@ -409,6 +421,52 @@ class SettingsDataStore(private val context: Context) {
+         }
+     }
+ 
++    // ---- Haptics ----
++
++    val hapticSettingsFlow: Flow<HapticSettings> by lazy {
++        context.dataStore.data
++            .catchException()
++            .map { preferences ->
++                HapticSettings.fromPreferences(
++                    enabled = preferences[hapticsEnabledKey],
++                    trackpad = preferences[hapticsTrackpadKey],
++                    scroll = preferences[hapticsScrollKey],
++                    keyboard = preferences[hapticsKeyboardKey],
++                    intensity = preferences[hapticsIntensityKey]
++                )
++            }
++    }
++
++    suspend fun saveHapticsEnabled(enabled: Boolean) {
++        context.dataStore.edit {
++            it[hapticsEnabledKey] = enabled
++        }
++    }
++
++    suspend fun saveHapticsTrackpad(enabled: Boolean) {
++        context.dataStore.edit {
++            it[hapticsTrackpadKey] = enabled
++        }
++    }
++
++    suspend fun saveHapticsScroll(enabled: Boolean) {
++        context.dataStore.edit {
++            it[hapticsScrollKey] = enabled
++        }
++    }
++
++    suspend fun saveHapticsKeyboard(enabled: Boolean) {
++        context.dataStore.edit {
++            it[hapticsKeyboardKey] = enabled
++        }
++    }
++
++    suspend fun saveHapticsIntensity(intensity: HapticIntensity) {
++        context.dataStore.edit {
++            it[hapticsIntensityKey] = intensity.persistedValue
++        }
++    }
++
+     // ---- Favorite Devices ----
+ 
+     val favoriteDevicesFlow: Flow<List<String>> = context.dataStore.data
+diff --git a/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt b/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt
+index c712c21..7bf1fa9 100644
+--- a/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt
++++ b/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt
+@@ -7,6 +7,8 @@ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguag
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
+ import com.atharok.btremote.domain.entities.settings.ConnectionSettings
++import com.atharok.btremote.domain.entities.settings.HapticIntensity
++import com.atharok.btremote.domain.entities.settings.HapticSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
+ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+@@ -159,6 +161,31 @@ class DataStoreRepositoryImpl(
+         settingsDataStore.saveFourFingerTap(action)
+     }
+ 
++    // ---- Haptics ----
++
++    override val hapticSettingsFlow: Flow<HapticSettings>
++        get() = settingsDataStore.hapticSettingsFlow
++
++    override suspend fun saveHapticsEnabled(enabled: Boolean) {
++        settingsDataStore.saveHapticsEnabled(enabled)
++    }
++
++    override suspend fun saveHapticsTrackpad(enabled: Boolean) {
++        settingsDataStore.saveHapticsTrackpad(enabled)
++    }
++
++    override suspend fun saveHapticsScroll(enabled: Boolean) {
++        settingsDataStore.saveHapticsScroll(enabled)
++    }
++
++    override suspend fun saveHapticsKeyboard(enabled: Boolean) {
++        settingsDataStore.saveHapticsKeyboard(enabled)
++    }
++
++    override suspend fun saveHapticsIntensity(intensity: HapticIntensity) {
++        settingsDataStore.saveHapticsIntensity(intensity)
++    }
++
+     // ---- Others ----
+ 
+     override fun getFavoriteDevices(): Flow<List<String>> = settingsDataStore.favoriteDevicesFlow
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/settings/HapticSettings.kt b/app/src/main/java/com/atharok/btremote/domain/entities/settings/HapticSettings.kt
+new file mode 100644
+index 0000000..4fa8a2b
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/settings/HapticSettings.kt
+@@ -0,0 +1,43 @@
++package com.atharok.btremote.domain.entities.settings
++
++enum class HapticIntensity(val persistedValue: String) {
++    LIGHT("light"),
++    MEDIUM("medium"),
++    STRONG("strong");
++
++    companion object {
++
++        fun fromPersistedValue(value: String?): HapticIntensity {
++            return entries.firstOrNull { it.persistedValue == value } ?: STRONG
++        }
++    }
++}
++
++data class HapticSettings(
++    val enabled: Boolean = true,
++    val trackpad: Boolean = true,
++    val scroll: Boolean = true,
++    val keyboard: Boolean = true,
++    val intensity: HapticIntensity = HapticIntensity.STRONG
++) {
++
++    companion object {
++
++        fun fromPreferences(
++            enabled: Boolean?,
++            trackpad: Boolean?,
++            scroll: Boolean?,
++            keyboard: Boolean?,
++            intensity: String?
++        ): HapticSettings {
++            val defaults = HapticSettings()
++            return HapticSettings(
++                enabled = enabled ?: defaults.enabled,
++                trackpad = trackpad ?: defaults.trackpad,
++                scroll = scroll ?: defaults.scroll,
++                keyboard = keyboard ?: defaults.keyboard,
++                intensity = HapticIntensity.fromPersistedValue(intensity)
++            )
++        }
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/haptics/HapticPolicy.kt b/app/src/main/java/com/atharok/btremote/domain/haptics/HapticPolicy.kt
+new file mode 100644
+index 0000000..e7346ce
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/haptics/HapticPolicy.kt
+@@ -0,0 +1,40 @@
++package com.atharok.btremote.domain.haptics
++
++import com.atharok.btremote.domain.entities.settings.HapticIntensity
++import com.atharok.btremote.domain.entities.settings.HapticSettings
++
++enum class HapticSource {
++    TRACKPAD,
++    KEYBOARD
++}
++
++object HapticPolicy {
++
++    const val SCROLL_INTERVAL_MILLIS = 40L
++
++    fun shouldTap(settings: HapticSettings, source: HapticSource): Boolean {
++        if (!settings.enabled) return false
++        return when (source) {
++            HapticSource.TRACKPAD -> settings.trackpad
++            HapticSource.KEYBOARD -> settings.keyboard
++        }
++    }
++
++    fun shouldEmitScroll(
++        settings: HapticSettings,
++        lastTickMillis: Long?,
++        nowMillis: Long
++    ): Boolean {
++        if (!settings.enabled || !settings.trackpad || !settings.scroll) return false
++        return lastTickMillis == null ||
++                nowMillis - lastTickMillis >= SCROLL_INTERVAL_MILLIS
++    }
++
++    fun amplitude(settings: HapticSettings): Int {
++        return when (settings.intensity) {
++            HapticIntensity.LIGHT -> 64
++            HapticIntensity.MEDIUM -> 128
++            HapticIntensity.STRONG -> 255
++        }
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt b/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt
+index b07133f..3425ef2 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt
+@@ -6,6 +6,8 @@ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguag
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
+ import com.atharok.btremote.domain.entities.settings.ConnectionSettings
++import com.atharok.btremote.domain.entities.settings.HapticIntensity
++import com.atharok.btremote.domain.entities.settings.HapticSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
+ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+@@ -88,6 +90,20 @@ interface DataStoreRepository {
+ 
+     suspend fun saveFourFingerTap(action: TrackpadGestureAction)
+ 
++    // ---- Haptics ----
++
++    val hapticSettingsFlow: Flow<HapticSettings>
++
++    suspend fun saveHapticsEnabled(enabled: Boolean)
++
++    suspend fun saveHapticsTrackpad(enabled: Boolean)
++
++    suspend fun saveHapticsScroll(enabled: Boolean)
++
++    suspend fun saveHapticsKeyboard(enabled: Boolean)
++
++    suspend fun saveHapticsIntensity(intensity: HapticIntensity)
++
+     // ---- Others ----
+ 
+     fun getFavoriteDevices(): Flow<List<String>>
+diff --git a/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt b/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt
+index fbff98b..f464dff 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt
+@@ -2,6 +2,8 @@ package com.atharok.btremote.domain.usecases
+ 
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.virtualKeyboard.VirtualKeyboardLayout
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
++import com.atharok.btremote.domain.entities.settings.HapticIntensity
++import com.atharok.btremote.domain.entities.settings.HapticSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.domain.repositories.BluetoothRepository
+@@ -17,6 +19,7 @@ class RemoteUseCase(
+ 
+     val remoteSettingsFlow: Flow<RemoteSettings> get() = dataStoreRepository.remoteSettingsFlow
+     val trackpadSettingsFlow: Flow<TrackpadSettings> get() = dataStoreRepository.trackpadSettingsFlow
++    val hapticSettingsFlow: Flow<HapticSettings> get() = dataStoreRepository.hapticSettingsFlow
+ 
+     suspend fun saveDoubleTapDragEnabled(enabled: Boolean) {
+         dataStoreRepository.saveDoubleTapDragEnabled(enabled)
+@@ -70,6 +73,26 @@ class RemoteUseCase(
+         dataStoreRepository.saveFourFingerTap(action)
+     }
+ 
++    suspend fun saveHapticsEnabled(enabled: Boolean) {
++        dataStoreRepository.saveHapticsEnabled(enabled)
++    }
++
++    suspend fun saveHapticsTrackpad(enabled: Boolean) {
++        dataStoreRepository.saveHapticsTrackpad(enabled)
++    }
++
++    suspend fun saveHapticsScroll(enabled: Boolean) {
++        dataStoreRepository.saveHapticsScroll(enabled)
++    }
++
++    suspend fun saveHapticsKeyboard(enabled: Boolean) {
++        dataStoreRepository.saveHapticsKeyboard(enabled)
++    }
++
++    suspend fun saveHapticsIntensity(intensity: HapticIntensity) {
++        dataStoreRepository.saveHapticsIntensity(intensity)
++    }
++
+     // ---- Connection ----
+ 
+     fun disconnectDevice(): Boolean {
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
+index a585ad8..2cfc48d 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
+@@ -8,6 +8,8 @@ import com.atharok.btremote.common.utils.REMOTE_REPORT_ID
+ import com.atharok.btremote.domain.entities.remoteInput.MouseAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.virtualKeyboard.VirtualKeyboardLayout
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
++import com.atharok.btremote.domain.entities.settings.HapticIntensity
++import com.atharok.btremote.domain.entities.settings.HapticSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.domain.usecases.RemoteUseCase
+@@ -25,6 +27,7 @@ class RemoteViewModel(
+ 
+     val remoteSettingsFlow: Flow<RemoteSettings> = useCase.remoteSettingsFlow
+     val trackpadSettingsFlow: Flow<TrackpadSettings> = useCase.trackpadSettingsFlow
++    val hapticSettingsFlow: Flow<HapticSettings> = useCase.hapticSettingsFlow
+ 
+     fun saveDoubleTapDragEnabled(enabled: Boolean) = viewModelScope.launch {
+         useCase.saveDoubleTapDragEnabled(enabled)
+@@ -78,6 +81,26 @@ class RemoteViewModel(
+         useCase.saveFourFingerTap(action)
+     }
+ 
++    fun saveHapticsEnabled(enabled: Boolean) = viewModelScope.launch {
++        useCase.saveHapticsEnabled(enabled)
++    }
++
++    fun saveHapticsTrackpad(enabled: Boolean) = viewModelScope.launch {
++        useCase.saveHapticsTrackpad(enabled)
++    }
++
++    fun saveHapticsScroll(enabled: Boolean) = viewModelScope.launch {
++        useCase.saveHapticsScroll(enabled)
++    }
++
++    fun saveHapticsKeyboard(enabled: Boolean) = viewModelScope.launch {
++        useCase.saveHapticsKeyboard(enabled)
++    }
++
++    fun saveHapticsIntensity(intensity: HapticIntensity) = viewModelScope.launch {
++        useCase.saveHapticsIntensity(intensity)
++    }
++
+     // ---- Connection ----
+ 
+     fun disconnectDevice(): Boolean = useCase.disconnectDevice()
+diff --git a/app/src/test/java/com/atharok/btremote/domain/haptics/HapticPolicyTest.kt b/app/src/test/java/com/atharok/btremote/domain/haptics/HapticPolicyTest.kt
+new file mode 100644
+index 0000000..0349ae1
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/haptics/HapticPolicyTest.kt
+@@ -0,0 +1,112 @@
++package com.atharok.btremote.domain.haptics
++
++import com.atharok.btremote.domain.entities.settings.HapticIntensity
++import com.atharok.btremote.domain.entities.settings.HapticSettings
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class HapticPolicyTest {
++
++    private val allEnabled = HapticSettings()
++
++    @Test
++    fun defaultsEnableEveryGroupAtStrongIntensity() {
++        assertTrue(allEnabled.enabled)
++        assertTrue(allEnabled.trackpad)
++        assertTrue(allEnabled.scroll)
++        assertTrue(allEnabled.keyboard)
++        assertEquals(HapticIntensity.STRONG, allEnabled.intensity)
++    }
++
++    @Test
++    fun masterSwitchDisablesEveryTapSource() {
++        val disabled = allEnabled.copy(enabled = false)
++
++        assertFalse(HapticPolicy.shouldTap(disabled, HapticSource.TRACKPAD))
++        assertFalse(HapticPolicy.shouldTap(disabled, HapticSource.KEYBOARD))
++    }
++
++    @Test
++    fun trackpadAndKeyboardGroupsAreGatedIndependently() {
++        val keyboardOnly = allEnabled.copy(trackpad = false)
++        val trackpadOnly = allEnabled.copy(keyboard = false)
++
++        assertFalse(HapticPolicy.shouldTap(keyboardOnly, HapticSource.TRACKPAD))
++        assertTrue(HapticPolicy.shouldTap(keyboardOnly, HapticSource.KEYBOARD))
++        assertTrue(HapticPolicy.shouldTap(trackpadOnly, HapticSource.TRACKPAD))
++        assertFalse(HapticPolicy.shouldTap(trackpadOnly, HapticSource.KEYBOARD))
++    }
++
++    @Test
++    fun scrollRequiresMasterTrackpadAndScrollGroups() {
++        assertTrue(HapticPolicy.shouldEmitScroll(allEnabled, null, 0))
++        assertFalse(HapticPolicy.shouldEmitScroll(allEnabled.copy(enabled = false), null, 0))
++        assertFalse(HapticPolicy.shouldEmitScroll(allEnabled.copy(trackpad = false), null, 0))
++        assertFalse(HapticPolicy.shouldEmitScroll(allEnabled.copy(scroll = false), null, 0))
++    }
++
++    @Test
++    fun scrollAllowsOneTickPerFortyMilliseconds() {
++        assertFalse(HapticPolicy.shouldEmitScroll(allEnabled, 100, 139))
++        assertTrue(HapticPolicy.shouldEmitScroll(allEnabled, 100, 140))
++        assertTrue(HapticPolicy.shouldEmitScroll(allEnabled, 100, 141))
++    }
++
++    @Test
++    fun intensityUsesDistinctOrderedAmplitudes() {
++        assertEquals(64, HapticPolicy.amplitude(allEnabled.copy(intensity = HapticIntensity.LIGHT)))
++        assertEquals(128, HapticPolicy.amplitude(allEnabled.copy(intensity = HapticIntensity.MEDIUM)))
++        assertEquals(255, HapticPolicy.amplitude(allEnabled.copy(intensity = HapticIntensity.STRONG)))
++    }
++
++    @Test
++    fun missingPreferencesKeepAllGroupsEnabledAtStrongIntensity() {
++        assertEquals(
++            HapticSettings(),
++            HapticSettings.fromPreferences(
++                enabled = null,
++                trackpad = null,
++                scroll = null,
++                keyboard = null,
++                intensity = null
++            )
++        )
++    }
++
++    @Test
++    fun unknownStoredIntensityFallsBackToStrong() {
++        val settings = HapticSettings.fromPreferences(
++            enabled = null,
++            trackpad = null,
++            scroll = null,
++            keyboard = null,
++            intensity = "future_intensity"
++        )
++
++        assertEquals(HapticIntensity.STRONG, settings.intensity)
++    }
++
++    @Test
++    fun storedValuesOverrideEveryHapticDefault() {
++        val settings = HapticSettings.fromPreferences(
++            enabled = false,
++            trackpad = false,
++            scroll = false,
++            keyboard = false,
++            intensity = HapticIntensity.LIGHT.persistedValue
++        )
++
++        assertEquals(
++            HapticSettings(
++                enabled = false,
++                trackpad = false,
++                scroll = false,
++                keyboard = false,
++                intensity = HapticIntensity.LIGHT
++            ),
++            settings
++        )
++    }
++}

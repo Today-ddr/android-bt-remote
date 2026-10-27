@@ -1,0 +1,291 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 01:33:02 +0800
+Subject: [PATCH] =?UTF-8?q?fix(keyboard):=20=E8=8B=B1=E8=AF=AD=20US=20?=
+ =?UTF-8?q?=E4=BD=BF=E7=94=A8=E4=B8=A5=E6=A0=BC=20ANSI?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactory.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactory.kt
+index 41fb2c3..3ff36c8 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactory.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactory.kt
+@@ -1,6 +1,7 @@
+ package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
+ 
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardKey
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardLayout
+@@ -8,13 +9,16 @@ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboar
+ /**
+  * Turns a language mapping into the physical MacBook presentation.
+  *
+- * Keys are relocated by HID usage, never by legend or array index, so a language keeps all of its
+- * usages and only changes its position on screen. Weights are assigned here instead of being read
+- * from the legacy language rows.
++ * Keys are relocated by HID usage, never by legend or array index. Every language keeps all of its
++ * usages except English US, whose legacy ISO alias is omitted to render strict ANSI. Weights are
++ * assigned here instead of being read from the legacy language rows.
+  */
+ object MacKeyboardLayoutFactory {
+ 
+-    fun build(layout: AdvancedKeyboardLayout): MacKeyboardLayout {
++    fun build(
++        layout: AdvancedKeyboardLayout,
++        language: KeyboardLanguage
++    ): MacKeyboardLayout {
+         val line1 = layout.line1.toList()
+         val line2 = layout.line2.toList()
+         val line3 = layout.line3.toList()
+@@ -23,9 +27,10 @@ object MacKeyboardLayoutFactory {
+         // The legacy rows keep the ANSI backslash and the ISO extra key inside the home and shift
+         // rows, so they are pulled out before the remaining characters are placed.
+         val grave = line4.firstOrNull { it.byte == KeyboardKey.ROW_1_KEY_00.byte }
+-        val isoExtra = line4.firstOrNull { it.byte == KeyboardKey.ROW_4_KEY_00.byte }
++        val sourceIsoExtra = line4.firstOrNull { it.byte == KeyboardKey.ROW_4_KEY_00.byte }
++        val isoExtra = sourceIsoExtra.takeUnless { language == KeyboardLanguage.ENGLISH_US }
+         val ansiBackslash = line3.firstOrNull { it.byte == KeyboardKey.ROW_3_KEY_11.byte }
+-        val shiftRowMovedUsages = setOfNotNull(grave?.byte, isoExtra?.byte)
++        val shiftRowMovedUsages = setOfNotNull(grave?.byte, sourceIsoExtra?.byte)
+         val homeRowMovedUsages = setOfNotNull(ansiBackslash?.byte)
+ 
+         val numberRow = buildList {
+diff --git a/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt b/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
+index 0d985ec..905c7bc 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
+@@ -132,8 +132,8 @@ fun AdvancedKeyboard(
+         }
+     }
+ 
+-    val macKeyboardLayout: MacKeyboardLayout = remember(keyboardLayout) {
+-        MacKeyboardLayoutFactory.build(keyboardLayout)
++    val macKeyboardLayout: MacKeyboardLayout = remember(keyboardLayout, keyboardLanguage) {
++        MacKeyboardLayoutFactory.build(keyboardLayout, keyboardLanguage)
+     }
+ 
+     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
+index 5561803..31c9678 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
+@@ -2,7 +2,9 @@ package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
+ 
+ import android.content.ContextWrapper
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardKey
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardLayout
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.ArabicAdvancedKeyboardLayout
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.BulgarianAdvancedKeyboardLayout
+@@ -68,6 +70,26 @@ class MacKeyboardLayoutFactoryTest {
+         arabic
+     )
+ 
++    private val layoutLanguages = mapOf(
++        englishUs to KeyboardLanguage.ENGLISH_US,
++        englishUk to KeyboardLanguage.ENGLISH_UK,
++        spanish to KeyboardLanguage.SPANISH,
++        french to KeyboardLanguage.FRENCH,
++        german to KeyboardLanguage.GERMAN,
++        russian to KeyboardLanguage.RUSSIAN,
++        czech to KeyboardLanguage.CZECH,
++        polish to KeyboardLanguage.POLISH,
++        portuguese to KeyboardLanguage.PORTUGUESE,
++        portugueseBr to KeyboardLanguage.BRAZILIAN,
++        greek to KeyboardLanguage.GREEK,
++        turkish to KeyboardLanguage.TURKISH,
++        hebrew to KeyboardLanguage.HEBREW,
++        bulgarian to KeyboardLanguage.BULGARIAN,
++        ukrainian to KeyboardLanguage.UKRAINIAN,
++        persian to KeyboardLanguage.PERSIAN,
++        arabic to KeyboardLanguage.ARABIC
++    )
++
+     private val structuralKeys: List<MacKeyboardKey> =
+         MacKeyboardSpec.functionRow.keys +
+                 listOf(
+@@ -94,12 +116,24 @@ class MacKeyboardLayoutFactoryTest {
+                 layout.line3.map { it.byte } +
+                 layout.line4.map { it.byte }
+ 
++    private fun build(layout: AdvancedKeyboardLayout): MacKeyboardLayout =
++        MacKeyboardLayoutFactory.build(layout, layoutLanguages.getValue(layout))
++
++    private fun expectedSourceKeys(layout: AdvancedKeyboardLayout): List<AdvancedKeyboardKey> {
++        val sourceKeys = (layout.line1 + layout.line2 + layout.line3 + layout.line4).toList()
++        return if (layoutLanguages.getValue(layout) == KeyboardLanguage.ENGLISH_US) {
++            sourceKeys.filterNot { it.byte == KeyboardKey.ROW_4_KEY_00.byte }
++        } else {
++            sourceKeys
++        }
++    }
++
+     @Test
+     fun buildsSixNonEmptyRowsForEveryLanguage() {
+         assertEquals(17, allLayouts.size)
+ 
+         allLayouts.forEach { layout ->
+-            val macLayout = MacKeyboardLayoutFactory.build(layout)
++            val macLayout = build(layout)
+ 
+             assertEquals(layout.javaClass.simpleName, 6, macLayout.rows.size)
+             assertTrue(layout.javaClass.simpleName, macLayout.rows.all { it.keys.isNotEmpty() })
+@@ -107,10 +141,10 @@ class MacKeyboardLayoutFactoryTest {
+     }
+ 
+     @Test
+-    fun preservesEverySourceKeyOnceWithItsBehaviorForEveryLanguage() {
++    fun preservesExpectedSourceKeysOnceWithTheirBehaviorForEveryLanguage() {
+         allLayouts.forEach { layout ->
+-            val macLayout = MacKeyboardLayoutFactory.build(layout)
+-            val sourceKeys = (layout.line1 + layout.line2 + layout.line3 + layout.line4).toList()
++            val macLayout = build(layout)
++            val sourceKeys = expectedSourceKeys(layout)
+ 
+             sourceKeys.forEach { sourceKey ->
+                 assertEquals(
+@@ -127,9 +161,9 @@ class MacKeyboardLayoutFactoryTest {
+     @Test
+     fun placesSourceAndStructuralKeysExactlyOnceForEveryLanguage() {
+         allLayouts.forEach { layout ->
+-            val macLayout = MacKeyboardLayoutFactory.build(layout)
++            val macLayout = build(layout)
+             val expected = (
+-                    (layout.line1 + layout.line2 + layout.line3 + layout.line4)
++                    expectedSourceKeys(layout)
+                         .map { it.byte to it.behavior } +
+                             structuralKeys.map { it.byte to it.behavior }
+                     ).sortedWith(usageOrder)
+@@ -141,7 +175,7 @@ class MacKeyboardLayoutFactoryTest {
+ 
+     @Test
+     fun keepsRowsInMacBookOrderForEnglishUs() {
+-        val rows = MacKeyboardLayoutFactory.build(englishUs).rows
++        val rows = build(englishUs).rows
+ 
+         assertEquals(
+             listOf(
+@@ -222,7 +256,6 @@ class MacKeyboardLayoutFactoryTest {
+         assertEquals(
+             listOf(
+                 KeyboardKey.KEY_SHIFT_LEFT.byte,
+-                KeyboardKey.ROW_4_KEY_00.byte,
+                 KeyboardKey.ROW_4_KEY_01.byte,
+                 KeyboardKey.ROW_4_KEY_02.byte,
+                 KeyboardKey.ROW_4_KEY_03.byte,
+@@ -257,17 +290,17 @@ class MacKeyboardLayoutFactoryTest {
+ 
+     @Test
+     fun reportsExplicitRowWeights() {
+-        val rows = MacKeyboardLayoutFactory.build(englishUs).rows
++        val rows = build(englishUs).rows
+ 
+         assertEquals(
+-            listOf(15f, 15f, 15f, 15f, 16f, 16.25f),
++            listOf(15f, 15f, 15f, 15f, 15f, 16.25f),
+             rows.map { it.totalWeight }
+         )
+     }
+ 
+     @Test
+     fun appliesStructuralWeightsToTheMovedKeys() {
+-        val rows = MacKeyboardLayoutFactory.build(englishUs).rows
++        val rows = build(englishUs).rows
+ 
+         assertEquals(MacKeyboardKeyWeight.CAPS_LOCK, rows[3].keys.first().weight)
+         assertEquals(MacKeyboardKeyWeight.ENTER, rows[3].keys.last().weight)
+@@ -286,7 +319,7 @@ class MacKeyboardLayoutFactoryTest {
+     @Test
+     fun keepsCapsLockAndModifiersOnTheirMacBookRows() {
+         allLayouts.forEach { layout ->
+-            val macLayout = MacKeyboardLayoutFactory.build(layout)
++            val macLayout = build(layout)
+             val capsLock = macLayout.rows[3].keys.first()
+ 
+             assertEquals(MacKeyboardKeyKind.CAPS_LOCK, capsLock.kind)
+@@ -320,7 +353,7 @@ class MacKeyboardLayoutFactoryTest {
+     @Test
+     fun movesGraveAndAnsiBackslashOutOfTheLegacyRows() {
+         allLayouts.forEach { layout ->
+-            val macLayout = MacKeyboardLayoutFactory.build(layout)
++            val macLayout = build(layout)
+ 
+             assertEquals(KeyboardKey.ROW_1_KEY_00.byte, macLayout.rows[1].keys.first().byte)
+             assertEquals(
+@@ -334,7 +367,7 @@ class MacKeyboardLayoutFactoryTest {
+ 
+     @Test
+     fun insertsTheIsoExtraKeyAfterLeftShift() {
+-        val macLayout = MacKeyboardLayoutFactory.build(german)
++        val macLayout = build(german)
+         val isoKey = macLayout.rows[4].keys[1]
+ 
+         assertEquals(KeyboardKey.ROW_4_KEY_00.byte, isoKey.byte)
+@@ -348,7 +381,7 @@ class MacKeyboardLayoutFactoryTest {
+             assertEquals(
+                 layout.javaClass.simpleName,
+                 listOf(KeyboardKey.ROW_4_KEY_00.byte),
+-                MacKeyboardLayoutFactory.build(layout)
++                build(layout)
+                     .keys
+                     .filter { it.kind == MacKeyboardKeyKind.ISO_EXTRA }
+                     .map { it.byte }
+@@ -357,22 +390,43 @@ class MacKeyboardLayoutFactoryTest {
+     }
+ 
+     @Test
+-    fun englishUsKeepsItsOwnIsoUsageWithoutGainingASecondOne() {
++    fun englishUsUsesStrictAnsiWithoutTheLegacyIsoExtra() {
+         val sourceIsoCount = sourceUsages(englishUs).count { it == KeyboardKey.ROW_4_KEY_00.byte }
+-        val macLayout = MacKeyboardLayoutFactory.build(englishUs)
++        val macLayout = build(englishUs)
+ 
+-        // The locale data already maps ROW_4_KEY_00 for US, so the strict ANSI rule must not
+-        // synthesise another ISO key and must not drop the existing usage either.
++        // US legacy data contains both ANSI backslash (ROW_3_KEY_11) and the ISO extra alias.
++        // Only the latter is omitted from the strict ANSI presentation.
+         assertEquals(1, sourceIsoCount)
+-        assertEquals(sourceIsoCount, macLayout.keys.count { it.byte == KeyboardKey.ROW_4_KEY_00.byte })
+-        assertEquals(1, macLayout.keys.count { it.kind == MacKeyboardKeyKind.ISO_EXTRA })
++        assertEquals(0, macLayout.keys.count { it.byte == KeyboardKey.ROW_4_KEY_00.byte })
++        assertTrue(macLayout.keys.none { it.kind == MacKeyboardKeyKind.ISO_EXTRA })
++        assertEquals(1, macLayout.keys.count { it.byte == KeyboardKey.ROW_3_KEY_11.byte })
++    }
++
++    @Test
++    fun everyNonUsLanguageKeepsEverySourceUsage() {
++        allLayouts
++            .filter { layoutLanguages.getValue(it) != KeyboardLanguage.ENGLISH_US }
++            .forEach { layout ->
++                val macLayout = build(layout)
++                val builtUsages = macLayout.keys.map { it.byte }.toSet()
++
++                assertTrue(
++                    layout.javaClass.simpleName,
++                    builtUsages.containsAll(sourceUsages(layout))
++                )
++                assertEquals(
++                    layout.javaClass.simpleName,
++                    1,
++                    macLayout.keys.count { it.kind == MacKeyboardKeyKind.ISO_EXTRA }
++                )
++            }
+     }
+ 
+     @Test
+-    fun keepsEveryLanguageCharacterLegend() {
++    fun keepsEveryExpectedCharacterLegend() {
+         allLayouts.forEach { layout ->
+-            val macLayout = MacKeyboardLayoutFactory.build(layout)
+-            val sourceKeys = (layout.line1 + layout.line2 + layout.line3 + layout.line4).toList()
++            val macLayout = build(layout)
++            val sourceKeys = expectedSourceKeys(layout)
+ 
+             sourceKeys.forEach { sourceKey ->
+                 val builtKey = macLayout.keys.first { it.byte == sourceKey.byte }

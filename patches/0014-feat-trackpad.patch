@@ -1,0 +1,996 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 01:05:52 +0800
+Subject: [PATCH] =?UTF-8?q?feat(trackpad):=20=E5=A2=9E=E5=8A=A0=E5=A4=9A?=
+ =?UTF-8?q?=E6=8C=87=E6=89=8B=E5=8A=BF=E8=AF=86=E5=88=AB=E7=8A=B6=E6=80=81?=
+ =?UTF-8?q?=E6=9C=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizer.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizer.kt
+new file mode 100644
+index 0000000..d596e98
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizer.kt
+@@ -0,0 +1,560 @@
++package com.atharok.btremote.domain.entities.remoteInput.trackpad
++
++import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
++import kotlin.math.abs
++import kotlin.math.atan2
++import kotlin.math.hypot
++
++data class TrackpadPointer(
++    val id: Long,
++    val x: Float,
++    val y: Float
++)
++
++data class TrackpadTouch(
++    val pointers: List<TrackpadPointer>,
++    val eventTimeMillis: Long
++)
++
++enum class TrackpadHapticEvent {
++    CLICK,
++    DRAG_START,
++    SCROLL,
++    GESTURE
++}
++
++sealed interface TrackpadGestureOutput {
++
++    data class Move(
++        val dx: Float,
++        val dy: Float,
++        val dragging: Boolean
++    ) : TrackpadGestureOutput
++
++    data class Click(val button: MouseAction) : TrackpadGestureOutput
++
++    data object DragStart : TrackpadGestureOutput
++
++    data object DragEnd : TrackpadGestureOutput
++
++    data class Scroll(val amount: Int) : TrackpadGestureOutput
++
++    data class Zoom(val scaleDelta: Float) : TrackpadGestureOutput
++
++    data class Rotate(val radians: Float) : TrackpadGestureOutput
++
++    data class Action(val action: TrackpadGestureAction) : TrackpadGestureOutput
++
++    data class Haptic(val event: TrackpadHapticEvent) : TrackpadGestureOutput
++}
++
++class TrackpadGestureRecognizer(
++    private val settings: TrackpadSettings = TrackpadSettings(),
++    private val invertScroll: Boolean = false,
++    private val scrollStep: Float = DEFAULT_SCROLL_STEP,
++    private val tapSlop: Float = DEFAULT_TAP_SLOP,
++    private val scrollClaimDistance: Float = DEFAULT_SCROLL_CLAIM_DISTANCE,
++    private val swipeDistance: Float = DEFAULT_SWIPE_DISTANCE
++) {
++
++    private enum class Mode {
++        NONE,
++        SINGLE,
++        TWO_FINGER,
++        MULTI_FINGER
++    }
++
++    private enum class TwoFingerOwner {
++        NONE,
++        SCROLL,
++        PINCH,
++        ROTATION
++    }
++
++    private data class Point(val x: Float, val y: Float)
++
++    private var mode = Mode.NONE
++    private var sequenceStartTimeMillis = 0L
++    private var initialCentroid = Point(0f, 0f)
++    private var lastCentroid = Point(0f, 0f)
++    private var maxCentroidDistance = 0f
++    private var previousPointers: Map<Long, TrackpadPointer> = emptyMap()
++
++    private var singleLastPointer: TrackpadPointer? = null
++    private var singleTotalDx = 0f
++    private var singleTotalDy = 0f
++    private var singleMoved = false
++    private var isDragging = false
++
++    private var lastTapTimeMillis = Long.MIN_VALUE
++    private var lastTapPosition = Point(0f, 0f)
++    private var doubleTapCandidate = false
++
++    private var twoFingerOwner = TwoFingerOwner.NONE
++    private var pinchStreak = 0
++    private var initialSeparation = 0f
++    private var lastSeparation = 0f
++    private var initialAngle = 0f
++    private var lastAngle = 0f
++    private var scrollAccumulator = 0f
++
++    private var multiFingerCount = 0
++
++    init {
++        require(scrollStep > 0f) { "scrollStep must be positive" }
++    }
++
++    fun onTouch(touch: TrackpadTouch): List<TrackpadGestureOutput> {
++        val currentPointers = touch.pointers
++            .distinctBy { it.id }
++            .sortedBy { it.id }
++            .associateBy { it.id }
++
++        return when {
++            currentPointers.isEmpty() -> endSequence(touch.eventTimeMillis)
++            previousPointers.isEmpty() -> {
++                beginSequence(currentPointers, touch.eventTimeMillis)
++                emptyList()
++            }
++            else -> updateSequence(currentPointers, touch.eventTimeMillis)
++        }.also {
++            previousPointers = currentPointers
++        }
++    }
++
++    /**
++     * Releases anything the recognizer is holding. Compose lifecycle teardown and
++     * pointer cancellation both land here.
++     */
++    fun reset(): List<TrackpadGestureOutput> {
++        val outputs = mutableListOf<TrackpadGestureOutput>()
++        if (isDragging) {
++            outputs += TrackpadGestureOutput.DragEnd
++        }
++        clearGestureState()
++        lastTapTimeMillis = Long.MIN_VALUE
++        previousPointers = emptyMap()
++        return outputs
++    }
++
++    fun cancel(): List<TrackpadGestureOutput> = reset()
++
++    private fun beginSequence(
++        pointers: Map<Long, TrackpadPointer>,
++        eventTimeMillis: Long
++    ) {
++        val lastTapTime = lastTapTimeMillis
++        val lastTapPosition = this.lastTapPosition
++        clearGestureState()
++
++        sequenceStartTimeMillis = eventTimeMillis
++        initialCentroid = centroid(pointers)
++        lastCentroid = initialCentroid
++        maxCentroidDistance = 0f
++
++        when {
++            pointers.size == 1 -> {
++                mode = Mode.SINGLE
++                val pointer = pointers.values.first()
++                singleLastPointer = pointer
++                doubleTapCandidate = settings.doubleTapDragEnabled &&
++                    lastTapTime != Long.MIN_VALUE &&
++                    eventTimeMillis - lastTapTime <= DOUBLE_TAP_MAX_DELAY_MILLIS &&
++                    hypot(
++                        pointer.x - lastTapPosition.x,
++                        pointer.y - lastTapPosition.y
++                    ) <= DOUBLE_TAP_MAX_DISTANCE
++                // A new one-finger sequence consumes the previous tap.
++                lastTapTimeMillis = Long.MIN_VALUE
++            }
++            pointers.size == 2 -> beginTwoFinger(pointers, eventTimeMillis)
++            else -> beginMultiFinger(pointers, eventTimeMillis)
++        }
++    }
++
++    private fun updateSequence(
++        pointers: Map<Long, TrackpadPointer>,
++        eventTimeMillis: Long
++    ): List<TrackpadGestureOutput> = when (mode) {
++        Mode.SINGLE -> {
++            if (pointers.size >= 2) {
++                val outputs = mutableListOf<TrackpadGestureOutput>()
++                if (isDragging) {
++                    outputs += TrackpadGestureOutput.DragEnd
++                }
++                beginTwoFinger(pointers, eventTimeMillis)
++                outputs
++            } else {
++                updateSingleFinger(pointers)
++            }
++        }
++        Mode.TWO_FINGER -> {
++            if (pointers.size >= 3) {
++                beginMultiFinger(pointers, eventTimeMillis)
++                emptyList()
++            } else {
++                updateTwoFinger(pointers)
++            }
++        }
++        Mode.MULTI_FINGER -> updateMultiFinger(pointers)
++        Mode.NONE -> emptyList()
++    }
++
++    private fun updateSingleFinger(
++        pointers: Map<Long, TrackpadPointer>
++    ): List<TrackpadGestureOutput> {
++        val pointer = pointers.values.firstOrNull() ?: return emptyList()
++        val lastPointer = singleLastPointer ?: pointer
++        val stepDx = pointer.x - lastPointer.x
++        val stepDy = pointer.y - lastPointer.y
++        singleTotalDx += stepDx
++        singleTotalDy += stepDy
++        singleLastPointer = pointer
++
++        val outputs = mutableListOf<TrackpadGestureOutput>()
++        val totalDistance = hypot(singleTotalDx, singleTotalDy)
++
++        if (!singleMoved && totalDistance > tapSlop) {
++            singleMoved = true
++            if (doubleTapCandidate) {
++                isDragging = true
++                outputs += TrackpadGestureOutput.Haptic(TrackpadHapticEvent.DRAG_START)
++                outputs += TrackpadGestureOutput.DragStart
++            }
++            outputs += TrackpadGestureOutput.Move(
++                dx = singleTotalDx,
++                dy = singleTotalDy,
++                dragging = isDragging
++            )
++        } else if (singleMoved && (stepDx != 0f || stepDy != 0f)) {
++            outputs += TrackpadGestureOutput.Move(
++                dx = stepDx,
++                dy = stepDy,
++                dragging = isDragging
++            )
++        }
++
++        return outputs
++    }
++
++    private fun beginTwoFinger(
++        pointers: Map<Long, TrackpadPointer>,
++        eventTimeMillis: Long
++    ) {
++        mode = Mode.TWO_FINGER
++        sequenceStartTimeMillis = eventTimeMillis
++        initialCentroid = centroid(pointers)
++        lastCentroid = initialCentroid
++        maxCentroidDistance = 0f
++        twoFingerOwner = TwoFingerOwner.NONE
++        pinchStreak = 0
++        initialSeparation = averageSeparation(pointers)
++        lastSeparation = initialSeparation
++        initialAngle = pointerAngle(pointers)
++        lastAngle = initialAngle
++        scrollAccumulator = 0f
++        isDragging = false
++    }
++
++    private fun updateTwoFinger(
++        pointers: Map<Long, TrackpadPointer>
++    ): List<TrackpadGestureOutput> {
++        if (pointers.size < 2) return emptyList()
++
++        val outputs = mutableListOf<TrackpadGestureOutput>()
++        val currentCentroid = centroid(pointers)
++        val centroidDistance = hypot(
++            currentCentroid.x - initialCentroid.x,
++            currentCentroid.y - initialCentroid.y
++        )
++        maxCentroidDistance = maxOf(maxCentroidDistance, centroidDistance)
++
++        val separation = averageSeparation(pointers)
++        val separationChange = if (initialSeparation > MIN_SEPARATION) {
++            abs(separation / initialSeparation - 1f)
++        } else {
++            0f
++        }
++        val angle = pointerAngle(pointers)
++        val rotationChange = normalizeAngle(angle - initialAngle)
++
++        if (twoFingerOwner == TwoFingerOwner.NONE) {
++            if (separationChange > PINCH_LATCH_RATIO) {
++                pinchStreak += 1
++            } else if (separationChange < PINCH_NOISE_RATIO) {
++                pinchStreak = 0
++            }
++
++            when {
++                pinchStreak >= PINCH_LATCH_EVENTS -> {
++                    twoFingerOwner = TwoFingerOwner.PINCH
++                }
++                centroidDistance >= scrollClaimDistance -> {
++                    twoFingerOwner = TwoFingerOwner.SCROLL
++                    scrollAccumulator = currentCentroid.y - initialCentroid.y
++                    outputs += scrollOutputs()
++                }
++                abs(rotationChange) >= ROTATION_CLAIM_RADIANS -> {
++                    twoFingerOwner = TwoFingerOwner.ROTATION
++                }
++            }
++        } else if (twoFingerOwner == TwoFingerOwner.SCROLL) {
++            scrollAccumulator += currentCentroid.y - lastCentroid.y
++            outputs += scrollOutputs()
++        }
++
++        lastCentroid = currentCentroid
++        lastSeparation = separation
++        lastAngle = angle
++        return outputs
++    }
++
++    private fun beginMultiFinger(
++        pointers: Map<Long, TrackpadPointer>,
++        eventTimeMillis: Long
++    ) {
++        mode = Mode.MULTI_FINGER
++        sequenceStartTimeMillis = eventTimeMillis
++        initialCentroid = centroid(pointers)
++        lastCentroid = initialCentroid
++        maxCentroidDistance = 0f
++        multiFingerCount = pointers.size
++        isDragging = false
++    }
++
++    private fun updateMultiFinger(
++        pointers: Map<Long, TrackpadPointer>
++    ): List<TrackpadGestureOutput> {
++        if (pointers.isEmpty()) return emptyList()
++
++        val currentCentroid = centroid(pointers)
++        val centroidDistance = hypot(
++            currentCentroid.x - initialCentroid.x,
++            currentCentroid.y - initialCentroid.y
++        )
++        maxCentroidDistance = maxOf(maxCentroidDistance, centroidDistance)
++        multiFingerCount = maxOf(multiFingerCount, pointers.size)
++        lastCentroid = currentCentroid
++        return emptyList()
++    }
++
++    private fun endSequence(eventTimeMillis: Long): List<TrackpadGestureOutput> {
++        val outputs = when (mode) {
++            Mode.SINGLE -> endSingleFinger(eventTimeMillis)
++            Mode.TWO_FINGER -> endTwoFinger(eventTimeMillis)
++            Mode.MULTI_FINGER -> endMultiFinger(eventTimeMillis)
++            Mode.NONE -> emptyList()
++        }
++        clearGestureState()
++        return outputs
++    }
++
++    private fun endSingleFinger(eventTimeMillis: Long): List<TrackpadGestureOutput> {
++        val outputs = mutableListOf<TrackpadGestureOutput>()
++        if (isDragging) {
++            outputs += TrackpadGestureOutput.DragEnd
++            isDragging = false
++            return outputs
++        }
++
++        val pointer = singleLastPointer
++        if (!singleMoved &&
++            pointer != null &&
++            eventTimeMillis - sequenceStartTimeMillis <= TAP_TIMEOUT_MILLIS
++        ) {
++            outputs += TrackpadGestureOutput.Haptic(TrackpadHapticEvent.CLICK)
++            outputs += TrackpadGestureOutput.Click(MouseAction.MOUSE_CLICK_LEFT)
++            lastTapTimeMillis = eventTimeMillis
++            lastTapPosition = Point(pointer.x, pointer.y)
++        }
++        return outputs
++    }
++
++    private fun endTwoFinger(eventTimeMillis: Long): List<TrackpadGestureOutput> {
++        val outputs = when (twoFingerOwner) {
++            TwoFingerOwner.SCROLL -> emptyList()
++            TwoFingerOwner.PINCH -> {
++                val scaleDelta = if (initialSeparation > MIN_SEPARATION) {
++                    lastSeparation / initialSeparation - 1f
++                } else {
++                    0f
++                }
++                if (abs(scaleDelta) > PINCH_OUTPUT_RATIO) {
++                    listOf(TrackpadGestureOutput.Zoom(scaleDelta))
++                } else {
++                    emptyList()
++                }
++            }
++            TwoFingerOwner.ROTATION -> {
++                val radians = normalizeAngle(lastAngle - initialAngle)
++                if (abs(radians) > ROTATION_OUTPUT_RADIANS) {
++                    listOf(TrackpadGestureOutput.Rotate(radians))
++                } else {
++                    emptyList()
++                }
++            }
++            TwoFingerOwner.NONE -> {
++                if (eventTimeMillis - sequenceStartTimeMillis <= TAP_TIMEOUT_MILLIS &&
++                    maxCentroidDistance <= tapSlop
++                ) {
++                    listOf(
++                        TrackpadGestureOutput.Haptic(TrackpadHapticEvent.CLICK),
++                        TrackpadGestureOutput.Click(MouseAction.MOUSE_CLICK_RIGHT)
++                    )
++                } else {
++                    emptyList()
++                }
++            }
++        }
++        return outputs
++    }
++
++    private fun endMultiFinger(eventTimeMillis: Long): List<TrackpadGestureOutput> {
++        val offsetX = lastCentroid.x - initialCentroid.x
++        val offsetY = lastCentroid.y - initialCentroid.y
++        val isTap = eventTimeMillis - sequenceStartTimeMillis <= TAP_TIMEOUT_MILLIS &&
++            maxCentroidDistance <= tapSlop
++        val isSwipe = !isTap && hypot(offsetX, offsetY) >= swipeDistance
++        val action = when {
++            isTap -> tapAction(multiFingerCount)
++            isSwipe -> swipeAction(multiFingerCount, offsetX, offsetY)
++            else -> TrackpadGestureAction.NONE
++        }
++
++        val outputs = mutableListOf<TrackpadGestureOutput>()
++        if (isTap || isSwipe) {
++            outputs += TrackpadGestureOutput.Haptic(TrackpadHapticEvent.GESTURE)
++        }
++        if (action != TrackpadGestureAction.NONE) {
++            outputs += TrackpadGestureOutput.Action(action)
++        }
++        return outputs
++    }
++
++    private fun tapAction(fingerCount: Int): TrackpadGestureAction = when (fingerCount) {
++        3 -> settings.threeFingerTap
++        4 -> settings.fourFingerTap
++        else -> TrackpadGestureAction.NONE
++    }
++
++    private fun swipeAction(
++        fingerCount: Int,
++        dx: Float,
++        dy: Float
++    ): TrackpadGestureAction {
++        val horizontal = abs(dx) >= abs(dy)
++        return when (fingerCount) {
++            3 -> when {
++                horizontal && dx < 0f -> settings.threeFingerSwipeLeft
++                horizontal -> settings.threeFingerSwipeRight
++                dy < 0f -> settings.threeFingerSwipeUp
++                else -> settings.threeFingerSwipeDown
++            }
++            4 -> when {
++                horizontal && dx < 0f -> settings.fourFingerSwipeLeft
++                horizontal -> settings.fourFingerSwipeRight
++                dy < 0f -> settings.fourFingerSwipeUp
++                else -> settings.fourFingerSwipeDown
++            }
++            else -> TrackpadGestureAction.NONE
++        }
++    }
++
++    private fun scrollOutputs(): List<TrackpadGestureOutput> {
++        val steps = (abs(scrollAccumulator) / scrollStep).toInt()
++        if (steps == 0) return emptyList()
++
++        val baseDirection = if (scrollAccumulator > 0f) -1 else 1
++        val direction = if (invertScroll) -baseDirection else baseDirection
++        scrollAccumulator -= scrollAccumulator.sign() * scrollStep * steps
++        return listOf(
++            TrackpadGestureOutput.Haptic(TrackpadHapticEvent.SCROLL),
++            TrackpadGestureOutput.Scroll(direction * steps)
++        )
++    }
++
++    private fun clearGestureState() {
++        mode = Mode.NONE
++        sequenceStartTimeMillis = 0L
++        initialCentroid = Point(0f, 0f)
++        lastCentroid = Point(0f, 0f)
++        maxCentroidDistance = 0f
++        singleLastPointer = null
++        singleTotalDx = 0f
++        singleTotalDy = 0f
++        singleMoved = false
++        isDragging = false
++        doubleTapCandidate = false
++        twoFingerOwner = TwoFingerOwner.NONE
++        pinchStreak = 0
++        initialSeparation = 0f
++        lastSeparation = 0f
++        initialAngle = 0f
++        lastAngle = 0f
++        scrollAccumulator = 0f
++        multiFingerCount = 0
++    }
++
++    private fun centroid(pointers: Map<Long, TrackpadPointer>): Point {
++        if (pointers.isEmpty()) return Point(0f, 0f)
++        var sumX = 0f
++        var sumY = 0f
++        pointers.values.forEach {
++            sumX += it.x
++            sumY += it.y
++        }
++        val count = pointers.size.toFloat()
++        return Point(sumX / count, sumY / count)
++    }
++
++    private fun averageSeparation(pointers: Map<Long, TrackpadPointer>): Float {
++        if (pointers.isEmpty()) return 0f
++        val center = centroid(pointers)
++        return pointers.values
++            .map { hypot(it.x - center.x, it.y - center.y) }
++            .average()
++            .toFloat()
++    }
++
++    private fun pointerAngle(pointers: Map<Long, TrackpadPointer>): Float {
++        val first = pointers.values.elementAtOrNull(0) ?: return 0f
++        val second = pointers.values.elementAtOrNull(1) ?: return 0f
++        return atan2(
++            (second.y - first.y).toDouble(),
++            (second.x - first.x).toDouble()
++        ).toFloat()
++    }
++
++    private fun normalizeAngle(angle: Float): Float {
++        var normalized = angle
++        while (normalized > PI_FLOAT) normalized -= FULL_TURN_RADIANS
++        while (normalized < -PI_FLOAT) normalized += FULL_TURN_RADIANS
++        return normalized
++    }
++
++    private fun Float.sign(): Float = when {
++        this > 0f -> 1f
++        this < 0f -> -1f
++        else -> 0f
++    }
++
++    private companion object {
++        const val DEFAULT_SCROLL_STEP = 6f
++        const val DEFAULT_TAP_SLOP = 12f
++        const val DEFAULT_SCROLL_CLAIM_DISTANCE = 10f
++        const val DEFAULT_SWIPE_DISTANCE = 40f
++        const val TAP_TIMEOUT_MILLIS = 300L
++        const val DOUBLE_TAP_MAX_DELAY_MILLIS = 280L
++        const val DOUBLE_TAP_MAX_DISTANCE = 30f
++        const val PINCH_LATCH_RATIO = 0.06f
++        const val PINCH_NOISE_RATIO = 0.015f
++        const val PINCH_LATCH_EVENTS = 3
++        const val PINCH_OUTPUT_RATIO = 0.08f
++        const val ROTATION_CLAIM_RADIANS = 0.18f
++        const val ROTATION_OUTPUT_RADIANS = 0.25f
++        const val MIN_SEPARATION = 1f
++        const val PI_FLOAT = 3.1415927f
++        const val FULL_TURN_RADIANS = 6.2831855f
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizerTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizerTest.kt
+new file mode 100644
+index 0000000..91c6f0b
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizerTest.kt
+@@ -0,0 +1,413 @@
++package com.atharok.btremote.domain.entities.remoteInput.trackpad
++
++import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import kotlin.math.cos
++import kotlin.math.sin
++
++class TrackpadGestureRecognizerTest {
++
++    @Test
++    fun oneFingerTapEmitsLeftClickAndHaptic() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        assertTrue(recognizer.onTouch(touch(0, pointer(0, 10f, 10f))).isEmpty())
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.CLICK),
++                TrackpadGestureOutput.Click(MouseAction.MOUSE_CLICK_LEFT)
++            ),
++            recognizer.onTouch(touch(80))
++        )
++    }
++
++    @Test
++    fun oneFingerMovePastTheTapSlopEmitsMovementButNeverClicks() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(touch(0, pointer(0, 10f, 10f)))
++
++        val outputs = recognizer.onTouch(touch(80, pointer(0, 30f, 20f)))
++
++        assertEquals(
++            listOf(TrackpadGestureOutput.Move(20f, 10f, dragging = false)),
++            outputs
++        )
++        assertTrue(recognizer.onTouch(touch(120)).isEmpty())
++    }
++
++    @Test
++    fun doubleTapThenMovePressesDragsAndReleases() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(touch(0, pointer(0, 10f, 10f)))
++        recognizer.onTouch(touch(50))
++        recognizer.onTouch(touch(100, pointer(0, 11f, 11f)))
++
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.DRAG_START),
++                TrackpadGestureOutput.DragStart,
++                TrackpadGestureOutput.Move(20f, 10f, dragging = true)
++            ),
++            recognizer.onTouch(touch(130, pointer(0, 31f, 21f)))
++        )
++        assertEquals(
++            listOf(TrackpadGestureOutput.DragEnd),
++            recognizer.onTouch(touch(160))
++        )
++    }
++
++    @Test
++    fun twoFingerTapEmitsRightClickAndHaptic() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(
++            touch(
++                0,
++                pointer(0, 50f, 50f),
++                pointer(1, 100f, 50f)
++            )
++        )
++
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.CLICK),
++                TrackpadGestureOutput.Click(MouseAction.MOUSE_CLICK_RIGHT)
++            ),
++            recognizer.onTouch(touch(100))
++        )
++    }
++
++    @Test
++    fun twoFingerScrollReportsAmountAndRespectsInversion() {
++        val normal = TrackpadGestureRecognizer()
++        val inverted = TrackpadGestureRecognizer(invertScroll = true)
++
++        normal.onTouch(twoFingerTouch(0, y = 50f))
++        inverted.onTouch(twoFingerTouch(0, y = 50f))
++
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.SCROLL),
++                TrackpadGestureOutput.Scroll(-2)
++            ),
++            normal.onTouch(twoFingerTouch(40, y = 62f))
++        )
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.SCROLL),
++                TrackpadGestureOutput.Scroll(2)
++            ),
++            inverted.onTouch(twoFingerTouch(40, y = 62f))
++        )
++    }
++
++    @Test
++    fun pinchOwnershipBlocksScrollUntilAllTouchesLift() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(twoFingerTouch(0, leftX = 50f, rightX = 100f))
++        spreadTo(recognizer, time = 20, leftX = 48f, rightX = 102f)
++        spreadTo(recognizer, time = 30, leftX = 46f, rightX = 104f)
++        spreadTo(recognizer, time = 40, leftX = 44f, rightX = 106f)
++
++        assertTrue(
++            recognizer.onTouch(
++                twoFingerTouch(
++                    60,
++                    leftX = 84f,
++                    rightX = 146f,
++                    y = 90f
++                )
++            ).none { it is TrackpadGestureOutput.Scroll }
++        )
++        val end = recognizer.onTouch(touch(100))
++
++        assertEquals(1, end.count { it is TrackpadGestureOutput.Zoom })
++        assertTrue(end.none { it is TrackpadGestureOutput.Scroll })
++    }
++
++    @Test
++    fun scrollOwnershipBlocksAnIncidentalPinch() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(twoFingerTouch(0, leftX = 50f, rightX = 100f))
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.SCROLL),
++                TrackpadGestureOutput.Scroll(-2)
++            ),
++            recognizer.onTouch(twoFingerTouch(40, leftX = 50f, rightX = 100f, y = 62f))
++        )
++
++        assertTrue(
++            recognizer.onTouch(
++                twoFingerTouch(
++                    60,
++                    leftX = 20f,
++                    rightX = 130f,
++                    y = 62f
++                )
++            ).isEmpty()
++        )
++        assertTrue(recognizer.onTouch(touch(100)).isEmpty())
++    }
++
++    @Test
++    fun pinchEmitsExactlyOneZoomAtTheEnd() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(twoFingerTouch(0, leftX = 50f, rightX = 100f))
++        spreadTo(recognizer, time = 20, leftX = 48f, rightX = 102f)
++        spreadTo(recognizer, time = 30, leftX = 46f, rightX = 104f)
++        spreadTo(recognizer, time = 40, leftX = 44f, rightX = 106f)
++        spreadTo(recognizer, time = 50, leftX = 42f, rightX = 108f)
++
++        val outputs = recognizer.onTouch(touch(100))
++
++        assertEquals(1, outputs.size)
++        val zoom = outputs.single() as TrackpadGestureOutput.Zoom
++        assertEquals(0.32f, zoom.scaleDelta, 0.001f)
++    }
++
++    @Test
++    fun rotationActsOnlyWhileTwoFingerOwnershipIsIdle() {
++        val idleOwner = TrackpadGestureRecognizer()
++        idleOwner.onTouch(rotatedTwoFingerTouch(0, angleRadians = 0f))
++        assertTrue(
++            idleOwner.onTouch(rotatedTwoFingerTouch(20, angleRadians = 0.10f))
++                .none { it is TrackpadGestureOutput.Rotate }
++        )
++        assertTrue(
++            idleOwner.onTouch(rotatedTwoFingerTouch(40, angleRadians = 0.30f))
++                .none { it is TrackpadGestureOutput.Scroll }
++        )
++        assertTrue(
++            idleOwner.onTouch(
++                rotatedTwoFingerTouch(
++                    time = 60,
++                    angleRadians = 0.30f,
++                    centerX = 120f,
++                    centerY = 150f
++                )
++            ).none { it is TrackpadGestureOutput.Scroll }
++        )
++        val idleEnd = idleOwner.onTouch(touch(100))
++        assertEquals(1, idleEnd.count { it is TrackpadGestureOutput.Rotate })
++        assertTrue(idleEnd.none { it is TrackpadGestureOutput.Scroll })
++
++        val scrollOwner = TrackpadGestureRecognizer()
++        scrollOwner.onTouch(twoFingerTouch(0, leftX = 50f, rightX = 100f))
++        scrollOwner.onTouch(twoFingerTouch(40, leftX = 50f, rightX = 100f, y = 62f))
++        assertTrue(
++            scrollOwner.onTouch(rotatedTwoFingerTouch(60, angleRadians = 0.40f))
++                .none { it is TrackpadGestureOutput.Rotate }
++        )
++        assertTrue(
++            scrollOwner.onTouch(touch(100))
++                .none { it is TrackpadGestureOutput.Rotate }
++        )
++    }
++
++    @Test
++    fun threeAndFourFingerTapsUseConfiguredActions() {
++        val threeFingerTapRecognizer = TrackpadGestureRecognizer(
++            settings = TrackpadSettings(threeFingerTap = TrackpadGestureAction.DOCK)
++        )
++        threeFingerTapRecognizer.onTouch(multiFingerTouch(0, fingerCount = 3))
++
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.GESTURE),
++                TrackpadGestureOutput.Action(TrackpadGestureAction.DOCK)
++            ),
++            threeFingerTapRecognizer.onTouch(touch(100))
++        )
++
++        val fourFingerTapRecognizer = TrackpadGestureRecognizer(
++            settings = TrackpadSettings(fourFingerTap = TrackpadGestureAction.SCREENSHOT)
++        )
++        fourFingerTapRecognizer.onTouch(multiFingerTouch(0, fingerCount = 4))
++
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.GESTURE),
++                TrackpadGestureOutput.Action(TrackpadGestureAction.SCREENSHOT)
++            ),
++            fourFingerTapRecognizer.onTouch(touch(100))
++        )
++    }
++
++    @Test
++    fun threeAndFourFingerSwipesMapEveryDirection() {
++        val cases = listOf(
++            SwipeCase(3, dx = 0f, dy = -60f, expected = TrackpadGestureAction.APP_SWITCHER),
++            SwipeCase(3, dx = 0f, dy = 60f, expected = TrackpadGestureAction.HOME),
++            SwipeCase(3, dx = -60f, dy = 0f, expected = TrackpadGestureAction.PREVIOUS_APP),
++            SwipeCase(3, dx = 60f, dy = 0f, expected = TrackpadGestureAction.NEXT_APP),
++            SwipeCase(4, dx = 0f, dy = -60f, expected = TrackpadGestureAction.MISSION_CONTROL),
++            SwipeCase(4, dx = 0f, dy = 60f, expected = TrackpadGestureAction.APP_EXPOSE),
++            SwipeCase(4, dx = -60f, dy = 0f, expected = TrackpadGestureAction.SWITCH_SPACE_LEFT),
++            SwipeCase(4, dx = 60f, dy = 0f, expected = TrackpadGestureAction.SWITCH_SPACE_RIGHT)
++        )
++
++        cases.forEach { case ->
++            val recognizer = TrackpadGestureRecognizer()
++            val start = multiFingerTouch(0, case.fingerCount)
++            recognizer.onTouch(start)
++            assertTrue(
++                recognizer.onTouch(
++                    multiFingerTouch(
++                        50,
++                        case.fingerCount,
++                        dx = case.dx,
++                        dy = case.dy
++                    )
++                ).isEmpty()
++            )
++            assertEquals(
++                case.toString(),
++                listOf(
++                    TrackpadGestureOutput.Haptic(TrackpadHapticEvent.GESTURE),
++                    TrackpadGestureOutput.Action(case.expected)
++                ),
++                recognizer.onTouch(touch(100))
++            )
++        }
++    }
++
++    @Test
++    fun resetReleasesAHeldDragAndClearsTheNextGesture() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(touch(0, pointer(0, 10f, 10f)))
++        recognizer.onTouch(touch(50))
++        recognizer.onTouch(touch(100, pointer(0, 11f, 11f)))
++        recognizer.onTouch(touch(130, pointer(0, 31f, 21f)))
++
++        assertEquals(
++            listOf(TrackpadGestureOutput.DragEnd),
++            recognizer.reset()
++        )
++        assertTrue(recognizer.reset().isEmpty())
++        recognizer.onTouch(touch(500, pointer(2, 10f, 10f)))
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.CLICK),
++                TrackpadGestureOutput.Click(MouseAction.MOUSE_CLICK_LEFT)
++            ),
++            recognizer.onTouch(touch(560))
++        )
++    }
++
++    @Test
++    fun cancelReleasesAHeldDrag() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(touch(0, pointer(0, 10f, 10f)))
++        recognizer.onTouch(touch(50))
++        recognizer.onTouch(touch(100, pointer(0, 11f, 11f)))
++        recognizer.onTouch(touch(130, pointer(0, 31f, 21f)))
++
++        assertEquals(
++            listOf(TrackpadGestureOutput.DragEnd),
++            recognizer.cancel()
++        )
++        assertTrue(recognizer.cancel().isEmpty())
++    }
++
++    @Test
++    fun liftingAllPointersClearsTwoFingerOwnershipForTheNextGesture() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(twoFingerTouch(0, leftX = 50f, rightX = 100f))
++        recognizer.onTouch(twoFingerTouch(40, leftX = 50f, rightX = 100f, y = 62f))
++        recognizer.onTouch(touch(80))
++
++        recognizer.onTouch(twoFingerTouch(200, leftX = 50f, rightX = 100f))
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.CLICK),
++                TrackpadGestureOutput.Click(MouseAction.MOUSE_CLICK_RIGHT)
++            ),
++            recognizer.onTouch(touch(260))
++        )
++    }
++
++    private fun spreadTo(
++        recognizer: TrackpadGestureRecognizer,
++        time: Long,
++        leftX: Float,
++        rightX: Float
++    ) {
++        assertTrue(
++            recognizer.onTouch(
++                twoFingerTouch(
++                    time,
++                    leftX = leftX,
++                    rightX = rightX
++                )
++            ).isEmpty()
++        )
++    }
++
++    private fun twoFingerTouch(
++        time: Long,
++        leftX: Float = 50f,
++        rightX: Float = 100f,
++        y: Float = 50f
++    ): TrackpadTouch = touch(
++        time,
++        pointer(0, leftX, y),
++        pointer(1, rightX, y)
++    )
++
++    private fun rotatedTwoFingerTouch(
++        time: Long,
++        angleRadians: Float,
++        centerX: Float = 100f,
++        centerY: Float = 100f
++    ): TrackpadTouch {
++        val radius = 20f
++        val dx = cos(angleRadians) * radius
++        val dy = sin(angleRadians) * radius
++        return touch(
++            time,
++            pointer(0, centerX - dx, centerY - dy),
++            pointer(1, centerX + dx, centerY + dy)
++        )
++    }
++
++    private fun multiFingerTouch(
++        time: Long,
++        fingerCount: Int,
++        dx: Float = 0f,
++        dy: Float = 0f
++    ): TrackpadTouch = touch(
++        time,
++        *List(fingerCount) { index ->
++            pointer(
++                id = index.toLong(),
++                x = 80f + index * 30f + dx,
++                y = 100f + dy
++            )
++        }.toTypedArray()
++    )
++
++    private fun touch(time: Long, vararg pointers: TrackpadPointer): TrackpadTouch =
++        TrackpadTouch(pointers.toList(), time)
++
++    private fun pointer(id: Long, x: Float, y: Float): TrackpadPointer =
++        TrackpadPointer(id, x, y)
++
++    private data class SwipeCase(
++        val fingerCount: Int,
++        val dx: Float,
++        val dy: Float,
++        val expected: TrackpadGestureAction
++    )
++}

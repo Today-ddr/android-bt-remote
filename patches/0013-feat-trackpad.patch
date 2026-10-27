@@ -1,0 +1,687 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 00:58:42 +0800
+Subject: [PATCH] =?UTF-8?q?feat(trackpad):=20=E6=8C=81=E4=B9=85=E5=8C=96?=
+ =?UTF-8?q?=E6=89=8B=E5=8A=BF=E6=98=A0=E5=B0=84=E8=AE=BE=E7=BD=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt b/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt
+index 6072a8c..015e587 100644
+--- a/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt
++++ b/app/src/main/java/com/atharok/btremote/data/dataStore/SettingsDataStore.kt
+@@ -28,10 +28,12 @@ import com.atharok.btremote.common.utils.isDynamicColorsAvailable
+ import com.atharok.btremote.domain.entities.RemoteNavigationEntity
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
+ import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.domain.entities.settings.connectionSettingsFrom
+ import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.flow.catch
+@@ -61,6 +63,19 @@ class SettingsDataStore(private val context: Context) {
+         private const val USE_MOUSE_NAVIGATION_BY_DEFAULT_KEY = "use_mouse_navigation_by_default_key"
+         private const val PHYSICAL_VOLUME_BUTTON_UP_ACTION_KEY = "physical_volume_button_up_action_key"
+         private const val PHYSICAL_VOLUME_BUTTON_DOWN_ACTION_KEY = "physical_volume_button_down_action_key"
++        private const val TRACKPAD_DOUBLE_TAP_DRAG_ENABLED_KEY = "trackpad_double_tap_drag_enabled_key"
++        private const val TRACKPAD_PINCH_ACTION_KEY = "trackpad_pinch_action_key"
++        private const val TRACKPAD_ROTATION_ACTION_KEY = "trackpad_rotation_action_key"
++        private const val TRACKPAD_THREE_FINGER_SWIPE_UP_KEY = "trackpad_three_finger_swipe_up_key"
++        private const val TRACKPAD_THREE_FINGER_SWIPE_DOWN_KEY = "trackpad_three_finger_swipe_down_key"
++        private const val TRACKPAD_THREE_FINGER_SWIPE_LEFT_KEY = "trackpad_three_finger_swipe_left_key"
++        private const val TRACKPAD_THREE_FINGER_SWIPE_RIGHT_KEY = "trackpad_three_finger_swipe_right_key"
++        private const val TRACKPAD_THREE_FINGER_TAP_KEY = "trackpad_three_finger_tap_key"
++        private const val TRACKPAD_FOUR_FINGER_SWIPE_UP_KEY = "trackpad_four_finger_swipe_up_key"
++        private const val TRACKPAD_FOUR_FINGER_SWIPE_DOWN_KEY = "trackpad_four_finger_swipe_down_key"
++        private const val TRACKPAD_FOUR_FINGER_SWIPE_LEFT_KEY = "trackpad_four_finger_swipe_left_key"
++        private const val TRACKPAD_FOUR_FINGER_SWIPE_RIGHT_KEY = "trackpad_four_finger_swipe_right_key"
++        private const val TRACKPAD_FOUR_FINGER_TAP_KEY = "trackpad_four_finger_tap_key"
+ 
+         private const val FAVORITE_DEVICES_KEY = "favorite_devices_key"
+         private const val AUTO_CONNECT_DEVICE_ADDRESS_KEY = "auto_connect_device_address_key"
+@@ -88,6 +103,19 @@ class SettingsDataStore(private val context: Context) {
+     private val useMouseNavigationByDefaultKey = booleanPreferencesKey(USE_MOUSE_NAVIGATION_BY_DEFAULT_KEY)
+     private val physicalVolumeUpButtonActionKey = stringPreferencesKey(PHYSICAL_VOLUME_BUTTON_UP_ACTION_KEY)
+     private val physicalVolumeDownButtonActionKey = stringPreferencesKey(PHYSICAL_VOLUME_BUTTON_DOWN_ACTION_KEY)
++    private val trackpadDoubleTapDragEnabledKey = booleanPreferencesKey(TRACKPAD_DOUBLE_TAP_DRAG_ENABLED_KEY)
++    private val trackpadPinchActionKey = stringPreferencesKey(TRACKPAD_PINCH_ACTION_KEY)
++    private val trackpadRotationActionKey = stringPreferencesKey(TRACKPAD_ROTATION_ACTION_KEY)
++    private val trackpadThreeFingerSwipeUpKey = stringPreferencesKey(TRACKPAD_THREE_FINGER_SWIPE_UP_KEY)
++    private val trackpadThreeFingerSwipeDownKey = stringPreferencesKey(TRACKPAD_THREE_FINGER_SWIPE_DOWN_KEY)
++    private val trackpadThreeFingerSwipeLeftKey = stringPreferencesKey(TRACKPAD_THREE_FINGER_SWIPE_LEFT_KEY)
++    private val trackpadThreeFingerSwipeRightKey = stringPreferencesKey(TRACKPAD_THREE_FINGER_SWIPE_RIGHT_KEY)
++    private val trackpadThreeFingerTapKey = stringPreferencesKey(TRACKPAD_THREE_FINGER_TAP_KEY)
++    private val trackpadFourFingerSwipeUpKey = stringPreferencesKey(TRACKPAD_FOUR_FINGER_SWIPE_UP_KEY)
++    private val trackpadFourFingerSwipeDownKey = stringPreferencesKey(TRACKPAD_FOUR_FINGER_SWIPE_DOWN_KEY)
++    private val trackpadFourFingerSwipeLeftKey = stringPreferencesKey(TRACKPAD_FOUR_FINGER_SWIPE_LEFT_KEY)
++    private val trackpadFourFingerSwipeRightKey = stringPreferencesKey(TRACKPAD_FOUR_FINGER_SWIPE_RIGHT_KEY)
++    private val trackpadFourFingerTapKey = stringPreferencesKey(TRACKPAD_FOUR_FINGER_TAP_KEY)
+     private val favoriteDevicesKey = stringPreferencesKey(FAVORITE_DEVICES_KEY)
+     private val autoConnectDeviceAddressKey = stringPreferencesKey(AUTO_CONNECT_DEVICE_ADDRESS_KEY)
+     private val autoConnectPausedKey = booleanPreferencesKey(AUTO_CONNECT_PAUSED_KEY)
+@@ -279,6 +307,108 @@ class SettingsDataStore(private val context: Context) {
+         }
+     }
+ 
++    // ---- Trackpad ----
++
++    val trackpadSettingsFlow: Flow<TrackpadSettings> by lazy {
++        context.dataStore.data
++            .catchException()
++            .map { preferences ->
++                TrackpadSettings.fromPreferences(
++                    doubleTapDragEnabled = preferences[trackpadDoubleTapDragEnabledKey],
++                    pinchAction = preferences[trackpadPinchActionKey],
++                    rotationAction = preferences[trackpadRotationActionKey],
++                    threeFingerSwipeUp = preferences[trackpadThreeFingerSwipeUpKey],
++                    threeFingerSwipeDown = preferences[trackpadThreeFingerSwipeDownKey],
++                    threeFingerSwipeLeft = preferences[trackpadThreeFingerSwipeLeftKey],
++                    threeFingerSwipeRight = preferences[trackpadThreeFingerSwipeRightKey],
++                    threeFingerTap = preferences[trackpadThreeFingerTapKey],
++                    fourFingerSwipeUp = preferences[trackpadFourFingerSwipeUpKey],
++                    fourFingerSwipeDown = preferences[trackpadFourFingerSwipeDownKey],
++                    fourFingerSwipeLeft = preferences[trackpadFourFingerSwipeLeftKey],
++                    fourFingerSwipeRight = preferences[trackpadFourFingerSwipeRightKey],
++                    fourFingerTap = preferences[trackpadFourFingerTapKey]
++                )
++            }
++    }
++
++    suspend fun saveDoubleTapDragEnabled(enabled: Boolean) {
++        context.dataStore.edit {
++            it[trackpadDoubleTapDragEnabledKey] = enabled
++        }
++    }
++
++    suspend fun savePinchAction(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadPinchActionKey] = action.persistedValue
++        }
++    }
++
++    suspend fun saveRotationAction(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadRotationActionKey] = action.persistedValue
++        }
++    }
++
++    suspend fun saveThreeFingerSwipeUp(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadThreeFingerSwipeUpKey] = action.persistedValue
++        }
++    }
++
++    suspend fun saveThreeFingerSwipeDown(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadThreeFingerSwipeDownKey] = action.persistedValue
++        }
++    }
++
++    suspend fun saveThreeFingerSwipeLeft(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadThreeFingerSwipeLeftKey] = action.persistedValue
++        }
++    }
++
++    suspend fun saveThreeFingerSwipeRight(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadThreeFingerSwipeRightKey] = action.persistedValue
++        }
++    }
++
++    suspend fun saveThreeFingerTap(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadThreeFingerTapKey] = action.persistedValue
++        }
++    }
++
++    suspend fun saveFourFingerSwipeUp(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadFourFingerSwipeUpKey] = action.persistedValue
++        }
++    }
++
++    suspend fun saveFourFingerSwipeDown(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadFourFingerSwipeDownKey] = action.persistedValue
++        }
++    }
++
++    suspend fun saveFourFingerSwipeLeft(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadFourFingerSwipeLeftKey] = action.persistedValue
++        }
++    }
++
++    suspend fun saveFourFingerSwipeRight(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadFourFingerSwipeRightKey] = action.persistedValue
++        }
++    }
++
++    suspend fun saveFourFingerTap(action: TrackpadGestureAction) {
++        context.dataStore.edit {
++            it[trackpadFourFingerTapKey] = action.persistedValue
++        }
++    }
++
+     // ---- Favorite Devices ----
+ 
+     val favoriteDevicesFlow: Flow<List<String>> = context.dataStore.data
+@@ -361,4 +491,4 @@ class SettingsDataStore(private val context: Context) {
+             it[hideBluetoothActivationButtonKey] = hide
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt b/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt
+index 46f9d7a..c712c21 100644
+--- a/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt
++++ b/app/src/main/java/com/atharok/btremote/data/repositories/DataStoreRepositoryImpl.kt
+@@ -4,10 +4,12 @@ import com.atharok.btremote.data.dataStore.SettingsDataStore
+ import com.atharok.btremote.domain.entities.RemoteNavigationEntity
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
+ import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.domain.repositories.DataStoreRepository
+ import kotlinx.coroutines.flow.Flow
+ 
+@@ -100,6 +102,63 @@ class DataStoreRepositoryImpl(
+         settingsDataStore.savePhysicalVolumeDownButtonAction(physicalVolumeButtonAction)
+     }
+ 
++    // ---- Trackpad ----
++
++    override val trackpadSettingsFlow: Flow<TrackpadSettings>
++        get() = settingsDataStore.trackpadSettingsFlow
++
++    override suspend fun saveDoubleTapDragEnabled(enabled: Boolean) {
++        settingsDataStore.saveDoubleTapDragEnabled(enabled)
++    }
++
++    override suspend fun savePinchAction(action: TrackpadGestureAction) {
++        settingsDataStore.savePinchAction(action)
++    }
++
++    override suspend fun saveRotationAction(action: TrackpadGestureAction) {
++        settingsDataStore.saveRotationAction(action)
++    }
++
++    override suspend fun saveThreeFingerSwipeUp(action: TrackpadGestureAction) {
++        settingsDataStore.saveThreeFingerSwipeUp(action)
++    }
++
++    override suspend fun saveThreeFingerSwipeDown(action: TrackpadGestureAction) {
++        settingsDataStore.saveThreeFingerSwipeDown(action)
++    }
++
++    override suspend fun saveThreeFingerSwipeLeft(action: TrackpadGestureAction) {
++        settingsDataStore.saveThreeFingerSwipeLeft(action)
++    }
++
++    override suspend fun saveThreeFingerSwipeRight(action: TrackpadGestureAction) {
++        settingsDataStore.saveThreeFingerSwipeRight(action)
++    }
++
++    override suspend fun saveThreeFingerTap(action: TrackpadGestureAction) {
++        settingsDataStore.saveThreeFingerTap(action)
++    }
++
++    override suspend fun saveFourFingerSwipeUp(action: TrackpadGestureAction) {
++        settingsDataStore.saveFourFingerSwipeUp(action)
++    }
++
++    override suspend fun saveFourFingerSwipeDown(action: TrackpadGestureAction) {
++        settingsDataStore.saveFourFingerSwipeDown(action)
++    }
++
++    override suspend fun saveFourFingerSwipeLeft(action: TrackpadGestureAction) {
++        settingsDataStore.saveFourFingerSwipeLeft(action)
++    }
++
++    override suspend fun saveFourFingerSwipeRight(action: TrackpadGestureAction) {
++        settingsDataStore.saveFourFingerSwipeRight(action)
++    }
++
++    override suspend fun saveFourFingerTap(action: TrackpadGestureAction) {
++        settingsDataStore.saveFourFingerTap(action)
++    }
++
+     // ---- Others ----
+ 
+     override fun getFavoriteDevices(): Flow<List<String>> = settingsDataStore.favoriteDevicesFlow
+@@ -129,4 +188,4 @@ class DataStoreRepositoryImpl(
+     override suspend fun saveHideBluetoothActivationButton(hide: Boolean) {
+         settingsDataStore.saveHideBluetoothActivationButton(hide)
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/settings/TrackpadSettings.kt b/app/src/main/java/com/atharok/btremote/domain/entities/settings/TrackpadSettings.kt
+new file mode 100644
+index 0000000..3806231
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/settings/TrackpadSettings.kt
+@@ -0,0 +1,66 @@
++package com.atharok.btremote.domain.entities.settings
++
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
++
++data class TrackpadSettings(
++    val doubleTapDragEnabled: Boolean = true,
++    val pinchAction: TrackpadGestureAction = TrackpadGestureAction.ZOOM,
++    val rotationAction: TrackpadGestureAction = TrackpadGestureAction.NONE,
++    val threeFingerSwipeUp: TrackpadGestureAction = TrackpadGestureAction.APP_SWITCHER,
++    val threeFingerSwipeDown: TrackpadGestureAction = TrackpadGestureAction.HOME,
++    val threeFingerSwipeLeft: TrackpadGestureAction = TrackpadGestureAction.PREVIOUS_APP,
++    val threeFingerSwipeRight: TrackpadGestureAction = TrackpadGestureAction.NEXT_APP,
++    val threeFingerTap: TrackpadGestureAction = TrackpadGestureAction.SPOTLIGHT,
++    val fourFingerSwipeUp: TrackpadGestureAction = TrackpadGestureAction.MISSION_CONTROL,
++    val fourFingerSwipeDown: TrackpadGestureAction = TrackpadGestureAction.APP_EXPOSE,
++    val fourFingerSwipeLeft: TrackpadGestureAction = TrackpadGestureAction.SWITCH_SPACE_LEFT,
++    val fourFingerSwipeRight: TrackpadGestureAction = TrackpadGestureAction.SWITCH_SPACE_RIGHT,
++    val fourFingerTap: TrackpadGestureAction = TrackpadGestureAction.CONTROL_CENTER
++) {
++
++    companion object {
++
++        fun fromPreferences(
++            doubleTapDragEnabled: Boolean?,
++            pinchAction: String?,
++            rotationAction: String?,
++            threeFingerSwipeUp: String?,
++            threeFingerSwipeDown: String?,
++            threeFingerSwipeLeft: String?,
++            threeFingerSwipeRight: String?,
++            threeFingerTap: String?,
++            fourFingerSwipeUp: String?,
++            fourFingerSwipeDown: String?,
++            fourFingerSwipeLeft: String?,
++            fourFingerSwipeRight: String?,
++            fourFingerTap: String?
++        ): TrackpadSettings {
++            val defaults = TrackpadSettings()
++            return TrackpadSettings(
++                doubleTapDragEnabled = doubleTapDragEnabled ?: defaults.doubleTapDragEnabled,
++                pinchAction = actionFrom(pinchAction, defaults.pinchAction),
++                rotationAction = actionFrom(rotationAction, defaults.rotationAction),
++                threeFingerSwipeUp = actionFrom(threeFingerSwipeUp, defaults.threeFingerSwipeUp),
++                threeFingerSwipeDown = actionFrom(threeFingerSwipeDown, defaults.threeFingerSwipeDown),
++                threeFingerSwipeLeft = actionFrom(threeFingerSwipeLeft, defaults.threeFingerSwipeLeft),
++                threeFingerSwipeRight = actionFrom(threeFingerSwipeRight, defaults.threeFingerSwipeRight),
++                threeFingerTap = actionFrom(threeFingerTap, defaults.threeFingerTap),
++                fourFingerSwipeUp = actionFrom(fourFingerSwipeUp, defaults.fourFingerSwipeUp),
++                fourFingerSwipeDown = actionFrom(fourFingerSwipeDown, defaults.fourFingerSwipeDown),
++                fourFingerSwipeLeft = actionFrom(fourFingerSwipeLeft, defaults.fourFingerSwipeLeft),
++                fourFingerSwipeRight = actionFrom(fourFingerSwipeRight, defaults.fourFingerSwipeRight),
++                fourFingerTap = actionFrom(fourFingerTap, defaults.fourFingerTap)
++            )
++        }
++
++        private fun actionFrom(
++            persistedValue: String?,
++            default: TrackpadGestureAction
++        ): TrackpadGestureAction {
++            if (persistedValue == null) return default
++            return TrackpadGestureAction.entries.firstOrNull {
++                it.persistedValue == persistedValue
++            } ?: TrackpadGestureAction.NONE
++        }
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt b/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt
+index 4516c8e..b07133f 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/repositories/DataStoreRepository.kt
+@@ -3,10 +3,12 @@ package com.atharok.btremote.domain.repositories
+ import com.atharok.btremote.domain.entities.RemoteNavigationEntity
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
+ import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import kotlinx.coroutines.flow.Flow
+ 
+ interface DataStoreRepository {
+@@ -56,6 +58,36 @@ interface DataStoreRepository {
+ 
+     suspend fun savePhysicalVolumeDownButtonAction(physicalVolumeButtonAction: PhysicalVolumeButtonAction)
+ 
++    // ---- Trackpad ----
++
++    val trackpadSettingsFlow: Flow<TrackpadSettings>
++
++    suspend fun saveDoubleTapDragEnabled(enabled: Boolean)
++
++    suspend fun savePinchAction(action: TrackpadGestureAction)
++
++    suspend fun saveRotationAction(action: TrackpadGestureAction)
++
++    suspend fun saveThreeFingerSwipeUp(action: TrackpadGestureAction)
++
++    suspend fun saveThreeFingerSwipeDown(action: TrackpadGestureAction)
++
++    suspend fun saveThreeFingerSwipeLeft(action: TrackpadGestureAction)
++
++    suspend fun saveThreeFingerSwipeRight(action: TrackpadGestureAction)
++
++    suspend fun saveThreeFingerTap(action: TrackpadGestureAction)
++
++    suspend fun saveFourFingerSwipeUp(action: TrackpadGestureAction)
++
++    suspend fun saveFourFingerSwipeDown(action: TrackpadGestureAction)
++
++    suspend fun saveFourFingerSwipeLeft(action: TrackpadGestureAction)
++
++    suspend fun saveFourFingerSwipeRight(action: TrackpadGestureAction)
++
++    suspend fun saveFourFingerTap(action: TrackpadGestureAction)
++
+     // ---- Others ----
+ 
+     fun getFavoriteDevices(): Flow<List<String>>
+@@ -71,4 +103,4 @@ interface DataStoreRepository {
+ 
+     fun hideBluetoothActivationButton(): Flow<Boolean>
+     suspend fun saveHideBluetoothActivationButton(hide: Boolean)
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt b/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt
+index a4a253c..fbff98b 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt
+@@ -1,7 +1,9 @@
+ package com.atharok.btremote.domain.usecases
+ 
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.virtualKeyboard.VirtualKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.domain.repositories.BluetoothRepository
+ import com.atharok.btremote.domain.repositories.DataStoreRepository
+ import kotlinx.coroutines.flow.Flow
+@@ -14,6 +16,59 @@ class RemoteUseCase(
+     // ---- Settings ----
+ 
+     val remoteSettingsFlow: Flow<RemoteSettings> get() = dataStoreRepository.remoteSettingsFlow
++    val trackpadSettingsFlow: Flow<TrackpadSettings> get() = dataStoreRepository.trackpadSettingsFlow
++
++    suspend fun saveDoubleTapDragEnabled(enabled: Boolean) {
++        dataStoreRepository.saveDoubleTapDragEnabled(enabled)
++    }
++
++    suspend fun savePinchAction(action: TrackpadGestureAction) {
++        dataStoreRepository.savePinchAction(action)
++    }
++
++    suspend fun saveRotationAction(action: TrackpadGestureAction) {
++        dataStoreRepository.saveRotationAction(action)
++    }
++
++    suspend fun saveThreeFingerSwipeUp(action: TrackpadGestureAction) {
++        dataStoreRepository.saveThreeFingerSwipeUp(action)
++    }
++
++    suspend fun saveThreeFingerSwipeDown(action: TrackpadGestureAction) {
++        dataStoreRepository.saveThreeFingerSwipeDown(action)
++    }
++
++    suspend fun saveThreeFingerSwipeLeft(action: TrackpadGestureAction) {
++        dataStoreRepository.saveThreeFingerSwipeLeft(action)
++    }
++
++    suspend fun saveThreeFingerSwipeRight(action: TrackpadGestureAction) {
++        dataStoreRepository.saveThreeFingerSwipeRight(action)
++    }
++
++    suspend fun saveThreeFingerTap(action: TrackpadGestureAction) {
++        dataStoreRepository.saveThreeFingerTap(action)
++    }
++
++    suspend fun saveFourFingerSwipeUp(action: TrackpadGestureAction) {
++        dataStoreRepository.saveFourFingerSwipeUp(action)
++    }
++
++    suspend fun saveFourFingerSwipeDown(action: TrackpadGestureAction) {
++        dataStoreRepository.saveFourFingerSwipeDown(action)
++    }
++
++    suspend fun saveFourFingerSwipeLeft(action: TrackpadGestureAction) {
++        dataStoreRepository.saveFourFingerSwipeLeft(action)
++    }
++
++    suspend fun saveFourFingerSwipeRight(action: TrackpadGestureAction) {
++        dataStoreRepository.saveFourFingerSwipeRight(action)
++    }
++
++    suspend fun saveFourFingerTap(action: TrackpadGestureAction) {
++        dataStoreRepository.saveFourFingerTap(action)
++    }
+ 
+     // ---- Connection ----
+ 
+@@ -34,4 +89,4 @@ class RemoteUseCase(
+     ): Boolean {
+         return bluetoothRepository.sendTextReport(text, virtualKeyboardLayout, shouldSendEnter)
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
+index 538690b..a585ad8 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
+@@ -7,7 +7,9 @@ import com.atharok.btremote.common.utils.MOUSE_REPORT_ID
+ import com.atharok.btremote.common.utils.REMOTE_REPORT_ID
+ import com.atharok.btremote.domain.entities.remoteInput.MouseAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.virtualKeyboard.VirtualKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.domain.usecases.RemoteUseCase
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.Job
+@@ -22,6 +24,59 @@ class RemoteViewModel(
+     // ---- Settings ----
+ 
+     val remoteSettingsFlow: Flow<RemoteSettings> = useCase.remoteSettingsFlow
++    val trackpadSettingsFlow: Flow<TrackpadSettings> = useCase.trackpadSettingsFlow
++
++    fun saveDoubleTapDragEnabled(enabled: Boolean) = viewModelScope.launch {
++        useCase.saveDoubleTapDragEnabled(enabled)
++    }
++
++    fun savePinchAction(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.savePinchAction(action)
++    }
++
++    fun saveRotationAction(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveRotationAction(action)
++    }
++
++    fun saveThreeFingerSwipeUp(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveThreeFingerSwipeUp(action)
++    }
++
++    fun saveThreeFingerSwipeDown(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveThreeFingerSwipeDown(action)
++    }
++
++    fun saveThreeFingerSwipeLeft(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveThreeFingerSwipeLeft(action)
++    }
++
++    fun saveThreeFingerSwipeRight(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveThreeFingerSwipeRight(action)
++    }
++
++    fun saveThreeFingerTap(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveThreeFingerTap(action)
++    }
++
++    fun saveFourFingerSwipeUp(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveFourFingerSwipeUp(action)
++    }
++
++    fun saveFourFingerSwipeDown(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveFourFingerSwipeDown(action)
++    }
++
++    fun saveFourFingerSwipeLeft(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveFourFingerSwipeLeft(action)
++    }
++
++    fun saveFourFingerSwipeRight(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveFourFingerSwipeRight(action)
++    }
++
++    fun saveFourFingerTap(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveFourFingerTap(action)
++    }
+ 
+     // ---- Connection ----
+ 
+@@ -56,4 +111,4 @@ class RemoteViewModel(
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/settings/TrackpadSettingsTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/settings/TrackpadSettingsTest.kt
+new file mode 100644
+index 0000000..68b5665
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/settings/TrackpadSettingsTest.kt
+@@ -0,0 +1,115 @@
++package com.atharok.btremote.domain.entities.settings
++
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class TrackpadSettingsTest {
++
++    @Test
++    fun defaultsMatchTheIosGestureBindings() {
++        val settings = TrackpadSettings()
++
++        assertTrue(settings.doubleTapDragEnabled)
++        assertEquals(TrackpadGestureAction.ZOOM, settings.pinchAction)
++        assertEquals(TrackpadGestureAction.NONE, settings.rotationAction)
++        assertEquals(TrackpadGestureAction.APP_SWITCHER, settings.threeFingerSwipeUp)
++        assertEquals(TrackpadGestureAction.HOME, settings.threeFingerSwipeDown)
++        assertEquals(TrackpadGestureAction.PREVIOUS_APP, settings.threeFingerSwipeLeft)
++        assertEquals(TrackpadGestureAction.NEXT_APP, settings.threeFingerSwipeRight)
++        assertEquals(TrackpadGestureAction.SPOTLIGHT, settings.threeFingerTap)
++        assertEquals(TrackpadGestureAction.MISSION_CONTROL, settings.fourFingerSwipeUp)
++        assertEquals(TrackpadGestureAction.APP_EXPOSE, settings.fourFingerSwipeDown)
++        assertEquals(TrackpadGestureAction.SWITCH_SPACE_LEFT, settings.fourFingerSwipeLeft)
++        assertEquals(TrackpadGestureAction.SWITCH_SPACE_RIGHT, settings.fourFingerSwipeRight)
++        assertEquals(TrackpadGestureAction.CONTROL_CENTER, settings.fourFingerTap)
++    }
++
++    @Test
++    fun missingPreferencesUseDefaults() {
++        assertEquals(
++            TrackpadSettings(),
++            TrackpadSettings.fromPreferences(
++                doubleTapDragEnabled = null,
++                pinchAction = null,
++                rotationAction = null,
++                threeFingerSwipeUp = null,
++                threeFingerSwipeDown = null,
++                threeFingerSwipeLeft = null,
++                threeFingerSwipeRight = null,
++                threeFingerTap = null,
++                fourFingerSwipeUp = null,
++                fourFingerSwipeDown = null,
++                fourFingerSwipeLeft = null,
++                fourFingerSwipeRight = null,
++                fourFingerTap = null
++            )
++        )
++    }
++
++    @Test
++    fun knownStoredValuesOverrideDefaults() {
++        val settings = TrackpadSettings.fromPreferences(
++            doubleTapDragEnabled = false,
++            pinchAction = TrackpadGestureAction.NONE.persistedValue,
++            rotationAction = TrackpadGestureAction.ROTATE_LEFT.persistedValue,
++            threeFingerSwipeUp = TrackpadGestureAction.DOCK.persistedValue,
++            threeFingerSwipeDown = TrackpadGestureAction.SPOTLIGHT.persistedValue,
++            threeFingerSwipeLeft = TrackpadGestureAction.SCREENSHOT.persistedValue,
++            threeFingerSwipeRight = TrackpadGestureAction.MIDDLE_CLICK.persistedValue,
++            threeFingerTap = TrackpadGestureAction.HOME.persistedValue,
++            fourFingerSwipeUp = TrackpadGestureAction.APP_SWITCHER.persistedValue,
++            fourFingerSwipeDown = TrackpadGestureAction.NEXT_APP.persistedValue,
++            fourFingerSwipeLeft = TrackpadGestureAction.PREVIOUS_APP.persistedValue,
++            fourFingerSwipeRight = TrackpadGestureAction.NOTIFICATION_CENTER.persistedValue,
++            fourFingerTap = TrackpadGestureAction.ROTATE_RIGHT.persistedValue
++        )
++
++        assertEquals(false, settings.doubleTapDragEnabled)
++        assertEquals(TrackpadGestureAction.NONE, settings.pinchAction)
++        assertEquals(TrackpadGestureAction.ROTATE_LEFT, settings.rotationAction)
++        assertEquals(TrackpadGestureAction.DOCK, settings.threeFingerSwipeUp)
++        assertEquals(TrackpadGestureAction.SPOTLIGHT, settings.threeFingerSwipeDown)
++        assertEquals(TrackpadGestureAction.SCREENSHOT, settings.threeFingerSwipeLeft)
++        assertEquals(TrackpadGestureAction.MIDDLE_CLICK, settings.threeFingerSwipeRight)
++        assertEquals(TrackpadGestureAction.HOME, settings.threeFingerTap)
++        assertEquals(TrackpadGestureAction.APP_SWITCHER, settings.fourFingerSwipeUp)
++        assertEquals(TrackpadGestureAction.NEXT_APP, settings.fourFingerSwipeDown)
++        assertEquals(TrackpadGestureAction.PREVIOUS_APP, settings.fourFingerSwipeLeft)
++        assertEquals(TrackpadGestureAction.NOTIFICATION_CENTER, settings.fourFingerSwipeRight)
++        assertEquals(TrackpadGestureAction.ROTATE_RIGHT, settings.fourFingerTap)
++    }
++
++    @Test
++    fun unknownStoredEnumsFallBackToNoAction() {
++        val settings = TrackpadSettings.fromPreferences(
++            doubleTapDragEnabled = null,
++            pinchAction = "future_pinch",
++            rotationAction = "future_rotation",
++            threeFingerSwipeUp = "future_three_up",
++            threeFingerSwipeDown = "future_three_down",
++            threeFingerSwipeLeft = "future_three_left",
++            threeFingerSwipeRight = "future_three_right",
++            threeFingerTap = "future_three_tap",
++            fourFingerSwipeUp = "future_four_up",
++            fourFingerSwipeDown = "future_four_down",
++            fourFingerSwipeLeft = "future_four_left",
++            fourFingerSwipeRight = "future_four_right",
++            fourFingerTap = "future_four_tap"
++        )
++
++        assertEquals(TrackpadGestureAction.NONE, settings.pinchAction)
++        assertEquals(TrackpadGestureAction.NONE, settings.rotationAction)
++        assertEquals(TrackpadGestureAction.NONE, settings.threeFingerSwipeUp)
++        assertEquals(TrackpadGestureAction.NONE, settings.threeFingerSwipeDown)
++        assertEquals(TrackpadGestureAction.NONE, settings.threeFingerSwipeLeft)
++        assertEquals(TrackpadGestureAction.NONE, settings.threeFingerSwipeRight)
++        assertEquals(TrackpadGestureAction.NONE, settings.threeFingerTap)
++        assertEquals(TrackpadGestureAction.NONE, settings.fourFingerSwipeUp)
++        assertEquals(TrackpadGestureAction.NONE, settings.fourFingerSwipeDown)
++        assertEquals(TrackpadGestureAction.NONE, settings.fourFingerSwipeLeft)
++        assertEquals(TrackpadGestureAction.NONE, settings.fourFingerSwipeRight)
++        assertEquals(TrackpadGestureAction.NONE, settings.fourFingerTap)
++    }
++}

@@ -1,0 +1,257 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 00:56:13 +0800
+Subject: [PATCH] =?UTF-8?q?feat(trackpad):=20=E5=A2=9E=E5=8A=A0=20macOS=20?=
+ =?UTF-8?q?=E6=89=8B=E5=8A=BF=E5=8A=A8=E4=BD=9C=E6=98=A0=E5=B0=84?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/GestureChord.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/GestureChord.kt
+new file mode 100644
+index 0000000..8e16758
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/GestureChord.kt
+@@ -0,0 +1,36 @@
++package com.atharok.btremote.domain.entities.remoteInput.trackpad
++
++import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++
++data class GestureChord(
++    val key: Byte?,
++    val modifiers: Int,
++    val mouseButton: MouseAction?
++) {
++
++    fun pressReport(): ByteArray {
++        val button = mouseButton ?: return keyboardReport(key ?: 0)
++        return byteArrayOf(button.byte, 0, 0, 0)
++    }
++
++    fun releaseReport(): ByteArray = when {
++        mouseButton != null -> ByteArray(MOUSE_REPORT_SIZE)
++        else -> ByteArray(KEYBOARD_REPORT_SIZE)
++    }
++
++    private fun keyboardReport(key: Byte): ByteArray = byteArrayOf(
++        modifiers.toByte(),
++        0,
++        key,
++        0,
++        0,
++        0,
++        0,
++        0
++    )
++
++    private companion object {
++        const val KEYBOARD_REPORT_SIZE = 8
++        const val MOUSE_REPORT_SIZE = 4
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureAction.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureAction.kt
+new file mode 100644
+index 0000000..b0c6bd5
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureAction.kt
+@@ -0,0 +1,64 @@
++package com.atharok.btremote.domain.entities.remoteInput.trackpad
++
++import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++
++enum class TrackpadGestureAction(val persistedValue: String) {
++    NONE("none"),
++    APP_SWITCHER("app_switcher"),
++    HOME("home"),
++    DOCK("dock"),
++    PREVIOUS_APP("previous_app"),
++    NEXT_APP("next_app"),
++    SPOTLIGHT("spotlight"),
++    CONTROL_CENTER("control_center"),
++    NOTIFICATION_CENTER("notification_center"),
++    MISSION_CONTROL("mission_control"),
++    APP_EXPOSE("app_expose"),
++    SWITCH_SPACE_LEFT("switch_space_left"),
++    SWITCH_SPACE_RIGHT("switch_space_right"),
++    SCREENSHOT("screenshot"),
++    MIDDLE_CLICK("middle_click"),
++    ZOOM("zoom"),
++    ROTATE_LEFT("rotate_left"),
++    ROTATE_RIGHT("rotate_right");
++
++    val chord: GestureChord?
++        get() = when (this) {
++            NONE -> null
++            APP_SWITCHER -> keyChord(KeyboardKey.KEY_UP_ARROW, COMMAND)
++            HOME -> keyChord(KeyboardKey.ROW_3_KEY_05, COMMAND)
++            DOCK -> keyChord(KeyboardKey.ROW_3_KEY_00, CONTROL or OPTION)
++            PREVIOUS_APP -> keyChord(KeyboardKey.KEY_TAB, COMMAND or SHIFT)
++            NEXT_APP -> keyChord(KeyboardKey.KEY_TAB, COMMAND)
++            SPOTLIGHT -> keyChord(KeyboardKey.KEY_SPACE_BAR, COMMAND)
++            CONTROL_CENTER -> keyChord(KeyboardKey.ROW_4_KEY_03, CONTROL or OPTION)
++            NOTIFICATION_CENTER -> keyChord(KeyboardKey.ROW_4_KEY_06, CONTROL or OPTION)
++            MISSION_CONTROL -> keyChord(KeyboardKey.KEY_UP_ARROW, CONTROL)
++            APP_EXPOSE -> keyChord(KeyboardKey.KEY_DOWN_ARROW, CONTROL)
++            SWITCH_SPACE_LEFT -> keyChord(KeyboardKey.KEY_LEFT_ARROW, CONTROL)
++            SWITCH_SPACE_RIGHT -> keyChord(KeyboardKey.KEY_RIGHT_ARROW, CONTROL)
++            SCREENSHOT -> keyChord(KeyboardKey.ROW_1_KEY_03, COMMAND or SHIFT)
++            MIDDLE_CLICK -> GestureChord(
++                key = null,
++                modifiers = 0,
++                mouseButton = MouseAction.MOUSE_CLICK_MIDDLE
++            )
++            ZOOM -> keyChord(KeyboardKey.ROW_1_KEY_12, COMMAND)
++            ROTATE_LEFT -> keyChord(KeyboardKey.ROW_2_KEY_03, COMMAND or OPTION)
++            ROTATE_RIGHT -> keyChord(KeyboardKey.ROW_2_KEY_03, COMMAND)
++        }
++
++    private fun keyChord(key: KeyboardKey, modifiers: Int) = GestureChord(
++        key = key.byte,
++        modifiers = modifiers,
++        mouseButton = null
++    )
++
++    private companion object {
++        const val SHIFT = 0x02
++        const val CONTROL = 0x01
++        const val OPTION = 0x04
++        const val COMMAND = 0x08
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureActionTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureActionTest.kt
+new file mode 100644
+index 0000000..4c180c5
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureActionTest.kt
+@@ -0,0 +1,129 @@
++package com.atharok.btremote.domain.entities.remoteInput.trackpad
++
++import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++import org.junit.Assert.assertArrayEquals
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++
++class TrackpadGestureActionTest {
++
++    private data class ExpectedChord(
++        val key: Byte?,
++        val modifiers: Int,
++        val mouseButton: MouseAction?
++    )
++
++    @Test
++    fun everyActionUsesTheIosMacOsChord() {
++        val expected = mapOf(
++            TrackpadGestureAction.NONE to null,
++            TrackpadGestureAction.APP_SWITCHER to
++                ExpectedChord(KeyboardKey.KEY_UP_ARROW.byte, CMD, null),
++            TrackpadGestureAction.HOME to
++                ExpectedChord(KeyboardKey.ROW_3_KEY_05.byte, CMD, null),
++            TrackpadGestureAction.DOCK to
++                ExpectedChord(KeyboardKey.ROW_3_KEY_00.byte, CTRL or ALT, null),
++            TrackpadGestureAction.PREVIOUS_APP to
++                ExpectedChord(KeyboardKey.KEY_TAB.byte, CMD or SHIFT, null),
++            TrackpadGestureAction.NEXT_APP to
++                ExpectedChord(KeyboardKey.KEY_TAB.byte, CMD, null),
++            TrackpadGestureAction.SPOTLIGHT to
++                ExpectedChord(KeyboardKey.KEY_SPACE_BAR.byte, CMD, null),
++            TrackpadGestureAction.CONTROL_CENTER to
++                ExpectedChord(KeyboardKey.ROW_4_KEY_03.byte, CTRL or ALT, null),
++            TrackpadGestureAction.NOTIFICATION_CENTER to
++                ExpectedChord(KeyboardKey.ROW_4_KEY_06.byte, CTRL or ALT, null),
++            TrackpadGestureAction.MISSION_CONTROL to
++                ExpectedChord(KeyboardKey.KEY_UP_ARROW.byte, CTRL, null),
++            TrackpadGestureAction.APP_EXPOSE to
++                ExpectedChord(KeyboardKey.KEY_DOWN_ARROW.byte, CTRL, null),
++            TrackpadGestureAction.SWITCH_SPACE_LEFT to
++                ExpectedChord(KeyboardKey.KEY_LEFT_ARROW.byte, CTRL, null),
++            TrackpadGestureAction.SWITCH_SPACE_RIGHT to
++                ExpectedChord(KeyboardKey.KEY_RIGHT_ARROW.byte, CTRL, null),
++            TrackpadGestureAction.SCREENSHOT to
++                ExpectedChord(KeyboardKey.ROW_1_KEY_03.byte, CMD or SHIFT, null),
++            TrackpadGestureAction.MIDDLE_CLICK to
++                ExpectedChord(null, 0, MouseAction.MOUSE_CLICK_MIDDLE),
++            TrackpadGestureAction.ZOOM to
++                ExpectedChord(KeyboardKey.ROW_1_KEY_12.byte, CMD, null),
++            TrackpadGestureAction.ROTATE_LEFT to
++                ExpectedChord(KeyboardKey.ROW_2_KEY_03.byte, CMD or ALT, null),
++            TrackpadGestureAction.ROTATE_RIGHT to
++                ExpectedChord(KeyboardKey.ROW_2_KEY_03.byte, CMD, null)
++        )
++
++        assertEquals(TrackpadGestureAction.entries.toSet(), expected.keys)
++        expected.forEach { (action, chord) ->
++            if (chord == null) {
++                assertNull(action.chord)
++            } else {
++                assertEquals(chord.key, action.chord?.key)
++                assertEquals(chord.modifiers, action.chord?.modifiers)
++                assertEquals(chord.mouseButton, action.chord?.mouseButton)
++            }
++        }
++    }
++
++    @Test
++    fun everyChordProducesItsHidPressAndReleaseReports() {
++        TrackpadGestureAction.entries.forEach { action ->
++            val chord = action.chord ?: return@forEach
++            val expectedPress = if (chord.mouseButton != null) {
++                byteArrayOf(chord.mouseButton.byte, 0, 0, 0)
++            } else {
++                byteArrayOf(
++                    chord.modifiers.toByte(),
++                    0,
++                    chord.key ?: 0,
++                    0,
++                    0,
++                    0,
++                    0,
++                    0
++                )
++            }
++            val expectedRelease = ByteArray(expectedPress.size)
++
++            assertArrayEquals("$action press", expectedPress, chord.pressReport())
++            assertArrayEquals("$action release", expectedRelease, chord.releaseReport())
++        }
++    }
++
++    @Test
++    fun persistedValuesMatchTheIosRawValues() {
++        val expected = mapOf(
++            TrackpadGestureAction.NONE to "none",
++            TrackpadGestureAction.APP_SWITCHER to "app_switcher",
++            TrackpadGestureAction.HOME to "home",
++            TrackpadGestureAction.DOCK to "dock",
++            TrackpadGestureAction.PREVIOUS_APP to "previous_app",
++            TrackpadGestureAction.NEXT_APP to "next_app",
++            TrackpadGestureAction.SPOTLIGHT to "spotlight",
++            TrackpadGestureAction.CONTROL_CENTER to "control_center",
++            TrackpadGestureAction.NOTIFICATION_CENTER to "notification_center",
++            TrackpadGestureAction.MISSION_CONTROL to "mission_control",
++            TrackpadGestureAction.APP_EXPOSE to "app_expose",
++            TrackpadGestureAction.SWITCH_SPACE_LEFT to "switch_space_left",
++            TrackpadGestureAction.SWITCH_SPACE_RIGHT to "switch_space_right",
++            TrackpadGestureAction.SCREENSHOT to "screenshot",
++            TrackpadGestureAction.MIDDLE_CLICK to "middle_click",
++            TrackpadGestureAction.ZOOM to "zoom",
++            TrackpadGestureAction.ROTATE_LEFT to "rotate_left",
++            TrackpadGestureAction.ROTATE_RIGHT to "rotate_right"
++        )
++
++        expected.forEach { (action, value) ->
++            assertEquals(value, action.persistedValue)
++        }
++    }
++
++    private companion object {
++        const val SHIFT = 0x02
++        const val CTRL = 0x01
++        const val ALT = 0x04
++        const val CMD = 0x08
++    }
++}

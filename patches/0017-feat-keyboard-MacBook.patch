@@ -1,0 +1,307 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 01:22:50 +0800
+Subject: [PATCH] =?UTF-8?q?feat(keyboard):=20=E4=BD=BF=E7=94=A8=20MacBook?=
+ =?UTF-8?q?=20=E5=85=AD=E8=A1=8C=E5=B8=83=E5=B1=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- AdvancedKeyboard 改为渲染 MacKeyboardLayoutFactory 的六行结果，并抽出薄行渲染器按显式 weight 分配按键
+- 保留同步 KeyboardReportState 按下/抬起、语言切换清空与 dispose/ON_STOP 清空
+- 用 BoxWithConstraints 区分紧凑竖屏与宽屏分支：竖屏最多半屏高、宽屏按 0.32 宽高比限高并收紧为 2dp 间距
+- 新增 MacKeyboardPresentationPolicy 纯函数与 7 条单测，断点对齐 iOS FullKeyboardLayoutPolicy 的 760dp
+- testDefaultDebugUnitTest 58 条与 assembleDefaultDebug 通过
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardPresentationPolicy.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardPresentationPolicy.kt
+new file mode 100644
+index 0000000..37e9a7e
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardPresentationPolicy.kt
+@@ -0,0 +1,41 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
++
++/**
++ * Sizing rules for the MacBook keyboard, mirroring the iOS client's FullKeyboardLayoutPolicy so
++ * the keyboard stays usable in portrait, narrow landscape and wide landscape.
++ */
++object MacKeyboardPresentationPolicy {
++
++    /** Wide layouts start where the iOS client splits keyboard and trackpad. */
++    const val WIDE_BREAKPOINT_DP = 760f
++
++    /** On a wide screen the keyboard keeps a MacBook-like aspect instead of stretching. */
++    const val WIDE_HEIGHT_TO_WIDTH_RATIO = 0.32f
++
++    /** In portrait the keyboard never takes more than half of the screen height. */
++    const val COMPACT_PORTRAIT_HEIGHT_RATIO = 0.5f
++
++    fun isWide(widthDp: Float): Boolean = widthDp >= WIDE_BREAKPOINT_DP
++
++    /**
++     * Returns the height budget of the keyboard.
++     *
++     * @param availableHeightDp height offered by the parent, or null when the parent is unbounded
++     * (for example inside a modal bottom sheet).
++     */
++    fun maxKeyboardHeight(
++        widthDp: Float,
++        availableHeightDp: Float?,
++        screenHeightDp: Float,
++        isPortrait: Boolean
++    ): Float {
++        val budget = availableHeightDp ?: screenHeightDp
++        val heightCap = if (isWide(widthDp)) {
++            widthDp * WIDE_HEIGHT_TO_WIDTH_RATIO
++        } else {
++            screenHeightDp * if (isPortrait) COMPACT_PORTRAIT_HEIGHT_RATIO else 1f
++        }
++
++        return minOf(budget, heightCap)
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt b/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
+index b4203e1..0d985ec 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
+@@ -2,12 +2,13 @@ package com.atharok.btremote.ui.views.keyboard
+ 
+ import android.content.res.Configuration
+ import androidx.compose.foundation.layout.Arrangement
+-import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.BoxWithConstraints
+ import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.ColumnScope
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.heightIn
+ import androidx.compose.foundation.layout.padding
+-import androidx.compose.foundation.layout.sizeIn
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
+@@ -36,6 +37,10 @@ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguag
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardKey
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.mac.MacKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.mac.MacKeyboardLayoutFactory
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.mac.MacKeyboardPresentationPolicy
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.mac.MacKeyboardRow
+ import com.atharok.btremote.ui.theme.surfaceElevationHigh
+ 
+ @Composable
+@@ -70,7 +75,7 @@ fun AdvancedKeyboard(
+     keyElevation: Dp = surfaceElevationHigh()
+ ) {
+     val configuration = LocalConfiguration.current
+-    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
++    val isPortrait = configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+     val reportState = remember { KeyboardReportState() }
+     val lifecycleOwner = LocalLifecycleOwner.current
+ 
+@@ -127,36 +132,76 @@ fun AdvancedKeyboard(
+         }
+     }
+ 
++    val macKeyboardLayout: MacKeyboardLayout = remember(keyboardLayout) {
++        MacKeyboardLayoutFactory.build(keyboardLayout)
++    }
++
+     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+-        Box(
++        BoxWithConstraints(
+             modifier = modifier,
+             contentAlignment = Alignment.Center
+         ) {
++            val compactSpacing = dimensionResource(id = R.dimen.padding_min)
++            val regularSpacing = dimensionResource(id = R.dimen.padding_small)
++            val availableWidth = if (maxWidth.value.isFinite()) {
++                maxWidth.value
++            } else {
++                configuration.screenWidthDp.toFloat()
++            }
++            val isWideLayout = MacKeyboardPresentationPolicy.isWide(availableWidth)
++            val spacing = if (isWideLayout) regularSpacing else compactSpacing
++            val maxKeyboardHeight = MacKeyboardPresentationPolicy.maxKeyboardHeight(
++                widthDp = availableWidth,
++                availableHeightDp = if (constraints.hasBoundedHeight) maxHeight.value else null,
++                screenHeightDp = configuration.screenHeightDp.toFloat(),
++                isPortrait = isPortrait
++            ).dp
++
+             Column(
+-                modifier = Modifier.sizeIn(
+-                    maxHeight = configuration.screenHeightDp.dp * if (isLandscape) 1f else 0.5f
+-                ),
+-                verticalArrangement = Arrangement.spacedBy(dimensionResource(id = R.dimen.padding_small))
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .heightIn(max = maxKeyboardHeight),
++                verticalArrangement = Arrangement.spacedBy(spacing)
+             ) {
+-                keyboardLayout.layout.forEach { keyboardRow ->
+-                    Row(
+-                        modifier = Modifier
+-                            .fillMaxWidth()
+-                            .weight(1f),
+-                        horizontalArrangement = Arrangement.Absolute.spacedBy(dimensionResource(id = R.dimen.padding_small))
+-                    ) {
+-                        keyboardRow.forEach { keyboardKey ->
+-                            keyboardKey.KeyboardKeyView(
+-                                touchDown = { sendKeyDown(keyboardKey) },
+-                                touchUp = { sendKeyUp(keyboardKey) },
+-                                modifier = Modifier.weight(keyboardKey.weight),
+-                                shape = shape,
+-                                elevation = keyElevation
+-                            )
+-                        }
+-                    }
++                macKeyboardLayout.rows.forEach { macKeyboardRow ->
++                    MacKeyboardRowView(
++                        row = macKeyboardRow,
++                        spacing = spacing,
++                        shape = shape,
++                        elevation = keyElevation,
++                        onKeyDown = ::sendKeyDown,
++                        onKeyUp = ::sendKeyUp
++                    )
+                 }
+             }
+         }
+     }
+ }
++
++@Composable
++private fun ColumnScope.MacKeyboardRowView(
++    row: MacKeyboardRow,
++    spacing: Dp,
++    shape: Shape,
++    elevation: Dp,
++    onKeyDown: (AdvancedKeyboardKey) -> Unit,
++    onKeyUp: (AdvancedKeyboardKey) -> Unit
++) {
++    Row(
++        modifier = Modifier
++            .fillMaxWidth()
++            .weight(1f),
++        horizontalArrangement = Arrangement.spacedBy(spacing)
++    ) {
++        row.keys.forEach { macKey ->
++            val keyboardKey = macKey.key
++            keyboardKey.KeyboardKeyView(
++                touchDown = { onKeyDown(keyboardKey) },
++                touchUp = { onKeyUp(keyboardKey) },
++                modifier = Modifier.weight(keyboardKey.weight),
++                shape = shape,
++                elevation = elevation
++            )
++        }
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardPresentationPolicyTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardPresentationPolicyTest.kt
+new file mode 100644
+index 0000000..1de2ea6
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardPresentationPolicyTest.kt
+@@ -0,0 +1,100 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class MacKeyboardPresentationPolicyTest {
++
++    @Test
++    fun wideBreakpointMatchesTheAppleReference() {
++        assertFalse(MacKeyboardPresentationPolicy.isWide(759f))
++        assertTrue(MacKeyboardPresentationPolicy.isWide(760f))
++        assertTrue(MacKeyboardPresentationPolicy.isWide(1024f))
++    }
++
++    @Test
++    fun compactPortraitKeepsHalfOfTheScreenHeight() {
++        val height = MacKeyboardPresentationPolicy.maxKeyboardHeight(
++            widthDp = 360f,
++            availableHeightDp = 500f,
++            screenHeightDp = 800f,
++            isPortrait = true
++        )
++
++        assertEquals(400f, height, 0.01f)
++    }
++
++    @Test
++    fun compactPortraitNeverExceedsTheAvailableHeight() {
++        val height = MacKeyboardPresentationPolicy.maxKeyboardHeight(
++            widthDp = 360f,
++            availableHeightDp = 300f,
++            screenHeightDp = 800f,
++            isPortrait = true
++        )
++
++        assertEquals(300f, height, 0.01f)
++    }
++
++    @Test
++    fun compactLandscapeUsesTheFullScreenHeight() {
++        val height = MacKeyboardPresentationPolicy.maxKeyboardHeight(
++            widthDp = 600f,
++            availableHeightDp = 500f,
++            screenHeightDp = 400f,
++            isPortrait = false
++        )
++
++        assertEquals(400f, height, 0.01f)
++    }
++
++    @Test
++    fun wideLayoutCapsHeightAgainstItsWidth() {
++        val height = MacKeyboardPresentationPolicy.maxKeyboardHeight(
++            widthDp = 1000f,
++            availableHeightDp = 700f,
++            screenHeightDp = 700f,
++            isPortrait = false
++        )
++
++        assertEquals(320f, height, 0.01f)
++    }
++
++    @Test
++    fun wideLayoutStillRespectsTheAvailableHeight() {
++        val height = MacKeyboardPresentationPolicy.maxKeyboardHeight(
++            widthDp = 1000f,
++            availableHeightDp = 200f,
++            screenHeightDp = 700f,
++            isPortrait = false
++        )
++
++        assertEquals(200f, height, 0.01f)
++    }
++
++    @Test
++    fun unboundedParentFallsBackToTheScreenHeight() {
++        assertEquals(
++            400f,
++            MacKeyboardPresentationPolicy.maxKeyboardHeight(
++                widthDp = 360f,
++                availableHeightDp = null,
++                screenHeightDp = 800f,
++                isPortrait = true
++            ),
++            0.01f
++        )
++        assertEquals(
++            400f,
++            MacKeyboardPresentationPolicy.maxKeyboardHeight(
++                widthDp = 600f,
++                availableHeightDp = null,
++                screenHeightDp = 400f,
++                isPortrait = false
++            ),
++            0.01f
++        )
++    }
++}

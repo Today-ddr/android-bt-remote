@@ -1,0 +1,973 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 01:49:20 +0800
+Subject: [PATCH] =?UTF-8?q?feat(settings):=20=E5=A2=9E=E5=8A=A0=E8=A7=A6?=
+ =?UTF-8?q?=E6=8E=A7=E6=9D=BF=E4=B8=8E=E6=8C=AF=E5=8A=A8=E8=AE=BE=E7=BD=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 增加手势映射与双击拖拽设置页
+
+- 展示 Mac 快捷键提示并按依赖控制振动分组
+
+- 补齐中英文文案与快捷提示测试
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureAction.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureAction.kt
+index b0c6bd5..a1df192 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureAction.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureAction.kt
+@@ -49,6 +49,14 @@ enum class TrackpadGestureAction(val persistedValue: String) {
+             ROTATE_RIGHT -> keyChord(KeyboardKey.ROW_2_KEY_03, COMMAND)
+         }
+ 
++    val shortcutHint: String
++        get() = when (this) {
++            NONE -> ""
++            MIDDLE_CLICK -> "Middle click"
++            ZOOM -> "⌘= / ⌘-"
++            else -> chord?.shortcutHint().orEmpty()
++        }
++
+     private fun keyChord(key: KeyboardKey, modifiers: Int) = GestureChord(
+         key = key.byte,
+         modifiers = modifiers,
+@@ -62,3 +70,39 @@ enum class TrackpadGestureAction(val persistedValue: String) {
+         const val COMMAND = 0x08
+     }
+ }
++
++private fun GestureChord.shortcutHint(): String {
++    val button = mouseButton
++    if (button != null) {
++        return if (button == MouseAction.MOUSE_CLICK_MIDDLE) "Middle click" else ""
++    }
++    val keyLabel = when (key) {
++        KeyboardKey.KEY_UP_ARROW.byte -> "↑"
++        KeyboardKey.KEY_DOWN_ARROW.byte -> "↓"
++        KeyboardKey.KEY_LEFT_ARROW.byte -> "←"
++        KeyboardKey.KEY_RIGHT_ARROW.byte -> "→"
++        KeyboardKey.KEY_TAB.byte -> "Tab"
++        KeyboardKey.KEY_SPACE_BAR.byte -> "Space"
++        KeyboardKey.ROW_1_KEY_03.byte -> "3"
++        KeyboardKey.ROW_1_KEY_11.byte -> "-"
++        KeyboardKey.ROW_1_KEY_12.byte -> "="
++        KeyboardKey.ROW_2_KEY_03.byte -> "R"
++        KeyboardKey.ROW_3_KEY_00.byte -> "A"
++        KeyboardKey.ROW_3_KEY_05.byte -> "H"
++        KeyboardKey.ROW_4_KEY_03.byte -> "C"
++        KeyboardKey.ROW_4_KEY_06.byte -> "N"
++        else -> "?"
++    }
++    return buildString {
++        if (modifiers and MODIFIER_CONTROL != 0) append("⌃")
++        if (modifiers and MODIFIER_OPTION != 0) append("⌥")
++        if (modifiers and MODIFIER_SHIFT != 0) append("⇧")
++        if (modifiers and MODIFIER_COMMAND != 0) append("⌘")
++        append(keyLabel)
++    }
++}
++
++private const val MODIFIER_CONTROL = 0x01
++private const val MODIFIER_SHIFT = 0x02
++private const val MODIFIER_OPTION = 0x04
++private const val MODIFIER_COMMAND = 0x08
+diff --git a/app/src/main/java/com/atharok/btremote/domain/usecases/SettingsUseCase.kt b/app/src/main/java/com/atharok/btremote/domain/usecases/SettingsUseCase.kt
+index f386855..457445f 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/usecases/SettingsUseCase.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/usecases/SettingsUseCase.kt
+@@ -3,10 +3,14 @@ package com.atharok.btremote.domain.usecases
+ import com.atharok.btremote.domain.entities.RemoteNavigationEntity
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
+ import com.atharok.btremote.domain.entities.settings.ConnectionSettings
++import com.atharok.btremote.domain.entities.settings.HapticIntensity
++import com.atharok.btremote.domain.entities.settings.HapticSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.domain.repositories.DataStoreRepository
+ import kotlinx.coroutines.flow.Flow
+ 
+@@ -41,6 +45,12 @@ class SettingsUseCase(private val dataStoreRepository: DataStoreRepository) {
+     val connectionSettingsFlow: Flow<ConnectionSettings> =
+         dataStoreRepository.connectionSettingsFlow
+ 
++    val trackpadSettingsFlow: Flow<TrackpadSettings> =
++        dataStoreRepository.trackpadSettingsFlow
++
++    val hapticSettingsFlow: Flow<HapticSettings> =
++        dataStoreRepository.hapticSettingsFlow
++
+     suspend fun saveDisconnectOnBackground(enabled: Boolean) {
+         dataStoreRepository.saveDisconnectOnBackground(enabled)
+     }
+@@ -101,6 +111,78 @@ class SettingsUseCase(private val dataStoreRepository: DataStoreRepository) {
+         dataStoreRepository.savePhysicalVolumeDownButtonAction(physicalVolumeButtonAction)
+     }
+ 
++    suspend fun saveDoubleTapDragEnabled(enabled: Boolean) {
++        dataStoreRepository.saveDoubleTapDragEnabled(enabled)
++    }
++
++    suspend fun savePinchAction(action: TrackpadGestureAction) {
++        dataStoreRepository.savePinchAction(action)
++    }
++
++    suspend fun saveRotationAction(action: TrackpadGestureAction) {
++        dataStoreRepository.saveRotationAction(action)
++    }
++
++    suspend fun saveThreeFingerSwipeUp(action: TrackpadGestureAction) {
++        dataStoreRepository.saveThreeFingerSwipeUp(action)
++    }
++
++    suspend fun saveThreeFingerSwipeDown(action: TrackpadGestureAction) {
++        dataStoreRepository.saveThreeFingerSwipeDown(action)
++    }
++
++    suspend fun saveThreeFingerSwipeLeft(action: TrackpadGestureAction) {
++        dataStoreRepository.saveThreeFingerSwipeLeft(action)
++    }
++
++    suspend fun saveThreeFingerSwipeRight(action: TrackpadGestureAction) {
++        dataStoreRepository.saveThreeFingerSwipeRight(action)
++    }
++
++    suspend fun saveThreeFingerTap(action: TrackpadGestureAction) {
++        dataStoreRepository.saveThreeFingerTap(action)
++    }
++
++    suspend fun saveFourFingerSwipeUp(action: TrackpadGestureAction) {
++        dataStoreRepository.saveFourFingerSwipeUp(action)
++    }
++
++    suspend fun saveFourFingerSwipeDown(action: TrackpadGestureAction) {
++        dataStoreRepository.saveFourFingerSwipeDown(action)
++    }
++
++    suspend fun saveFourFingerSwipeLeft(action: TrackpadGestureAction) {
++        dataStoreRepository.saveFourFingerSwipeLeft(action)
++    }
++
++    suspend fun saveFourFingerSwipeRight(action: TrackpadGestureAction) {
++        dataStoreRepository.saveFourFingerSwipeRight(action)
++    }
++
++    suspend fun saveFourFingerTap(action: TrackpadGestureAction) {
++        dataStoreRepository.saveFourFingerTap(action)
++    }
++
++    suspend fun saveHapticsEnabled(enabled: Boolean) {
++        dataStoreRepository.saveHapticsEnabled(enabled)
++    }
++
++    suspend fun saveHapticsTrackpad(enabled: Boolean) {
++        dataStoreRepository.saveHapticsTrackpad(enabled)
++    }
++
++    suspend fun saveHapticsScroll(enabled: Boolean) {
++        dataStoreRepository.saveHapticsScroll(enabled)
++    }
++
++    suspend fun saveHapticsKeyboard(enabled: Boolean) {
++        dataStoreRepository.saveHapticsKeyboard(enabled)
++    }
++
++    suspend fun saveHapticsIntensity(intensity: HapticIntensity) {
++        dataStoreRepository.saveHapticsIntensity(intensity)
++    }
++
+     // ---- Others ----
+ 
+     fun showRemoteButtonsInNotification(): Flow<Boolean> = dataStoreRepository.showRemoteButtonsInNotification()
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/SettingsViewModel.kt b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/SettingsViewModel.kt
+index cb9739d..c4c9889 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/SettingsViewModel.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/SettingsViewModel.kt
+@@ -5,10 +5,14 @@ import androidx.lifecycle.viewModelScope
+ import com.atharok.btremote.domain.entities.RemoteNavigationEntity
+ import com.atharok.btremote.domain.entities.remoteInput.PhysicalVolumeButtonAction
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
+ import com.atharok.btremote.domain.entities.settings.ConnectionSettings
++import com.atharok.btremote.domain.entities.settings.HapticIntensity
++import com.atharok.btremote.domain.entities.settings.HapticSettings
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.ThemeEntity
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.domain.usecases.SettingsUseCase
+ import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.launch
+@@ -44,6 +48,10 @@ class SettingsViewModel(
+     val connectionSettingsFlow: Flow<ConnectionSettings> =
+         useCase.connectionSettingsFlow
+ 
++    val trackpadSettingsFlow: Flow<TrackpadSettings> = useCase.trackpadSettingsFlow
++
++    val hapticSettingsFlow: Flow<HapticSettings> = useCase.hapticSettingsFlow
++
+     fun saveDisconnectOnBackground(enabled: Boolean) = viewModelScope.launch {
+         useCase.saveDisconnectOnBackground(enabled)
+     }
+@@ -104,6 +112,78 @@ class SettingsViewModel(
+         useCase.savePhysicalVolumeDownButtonAction(physicalVolumeButtonAction)
+     }
+ 
++    fun saveDoubleTapDragEnabled(enabled: Boolean) = viewModelScope.launch {
++        useCase.saveDoubleTapDragEnabled(enabled)
++    }
++
++    fun savePinchAction(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.savePinchAction(action)
++    }
++
++    fun saveRotationAction(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveRotationAction(action)
++    }
++
++    fun saveThreeFingerSwipeUp(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveThreeFingerSwipeUp(action)
++    }
++
++    fun saveThreeFingerSwipeDown(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveThreeFingerSwipeDown(action)
++    }
++
++    fun saveThreeFingerSwipeLeft(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveThreeFingerSwipeLeft(action)
++    }
++
++    fun saveThreeFingerSwipeRight(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveThreeFingerSwipeRight(action)
++    }
++
++    fun saveThreeFingerTap(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveThreeFingerTap(action)
++    }
++
++    fun saveFourFingerSwipeUp(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveFourFingerSwipeUp(action)
++    }
++
++    fun saveFourFingerSwipeDown(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveFourFingerSwipeDown(action)
++    }
++
++    fun saveFourFingerSwipeLeft(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveFourFingerSwipeLeft(action)
++    }
++
++    fun saveFourFingerSwipeRight(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveFourFingerSwipeRight(action)
++    }
++
++    fun saveFourFingerTap(action: TrackpadGestureAction) = viewModelScope.launch {
++        useCase.saveFourFingerTap(action)
++    }
++
++    fun saveHapticsEnabled(enabled: Boolean) = viewModelScope.launch {
++        useCase.saveHapticsEnabled(enabled)
++    }
++
++    fun saveHapticsTrackpad(enabled: Boolean) = viewModelScope.launch {
++        useCase.saveHapticsTrackpad(enabled)
++    }
++
++    fun saveHapticsScroll(enabled: Boolean) = viewModelScope.launch {
++        useCase.saveHapticsScroll(enabled)
++    }
++
++    fun saveHapticsKeyboard(enabled: Boolean) = viewModelScope.launch {
++        useCase.saveHapticsKeyboard(enabled)
++    }
++
++    fun saveHapticsIntensity(intensity: HapticIntensity) = viewModelScope.launch {
++        useCase.saveHapticsIntensity(intensity)
++    }
++
+     // ---- Others ----
+ 
+     val showRemoteButtonsInNotificationFlow: Flow<Boolean> get() = useCase.showRemoteButtonsInNotification()
+diff --git a/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt b/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
+index 6bc8be9..53cb0fd 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
+@@ -46,6 +46,7 @@ import com.atharok.btremote.ui.screens.DistantDevicePairScreen
+ import com.atharok.btremote.ui.screens.RemoteScreen
+ import com.atharok.btremote.ui.screens.SettingsScreen
+ import com.atharok.btremote.ui.screens.ThirdLibrariesScreen
++import com.atharok.btremote.ui.screens.TrackpadGestureSettingsScreen
+ import com.atharok.btremote.ui.theme.BtRemoteTheme
+ import com.atharok.btremote.ui.theme.surfaceElevationLow
+ import org.koin.androidx.compose.koinViewModel
+@@ -156,6 +157,16 @@ fun BtRemoteApp(
+                             navigateToThirdLibrariesScreen = {
+                                 navController.navigateTo(AppNavDestination.ThirdLibrariesDestination.route)
+                             },
++                            navigateToTrackpadGestureSettingsScreen = {
++                                navController.navigateTo(AppNavDestination.TrackpadGestureSettingsDestination.route)
++                            },
++                            modifier = Modifier
++                        )
++                    },
++
++                    trackpadGestureSettingsScreen = {
++                        TrackpadGestureSettingsScreen(
++                            navigateUp = { navController.navigateUp() },
+                             modifier = Modifier
+                         )
+                     },
+diff --git a/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavDestination.kt b/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavDestination.kt
+index a948f45..aa19879 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavDestination.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavDestination.kt
+@@ -3,10 +3,11 @@ package com.atharok.btremote.ui.navigation
+ sealed class AppNavDestination(val route: String) {
+     data object BluetoothPermissionsDestination: AppNavDestination(route = "bluetooth_permissions_route")
+     data object SettingsDestination: AppNavDestination(route = "settings_route")
++    data object TrackpadGestureSettingsDestination: AppNavDestination(route = "trackpad_gesture_settings_route")
+     data object ThirdLibrariesDestination: AppNavDestination(route = "third_libraries_route")
+     data object BluetoothActivationDestination: AppNavDestination(route = "bluetooth_activation_route")
+     data object DeviceSelectionDestination: AppNavDestination(route = "bluetooth_device_selection_route")
+     data object DeviceDiscoveryDestination: AppNavDestination(route = "bluetooth_pairing_from_a_scanned_device_route")
+     data object DistantDevicePairDestination: AppNavDestination(route = "bluetooth_pairing_from_a_remote_device_route")
+     data object RemoteDestination: AppNavDestination(route = "bluetooth_remote_route")
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavHost.kt b/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavHost.kt
+index 576e63d..af26456 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavHost.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavHost.kt
+@@ -42,6 +42,7 @@ fun AppNavHost(
+     startDestination: String,
+     bluetoothPermissionsScreen: @Composable () -> Unit,
+     settingsScreen: @Composable () -> Unit,
++    trackpadGestureSettingsScreen: @Composable () -> Unit,
+     thirdLibrariesScreen: @Composable () -> Unit,
+     bluetoothActivationScreen: @Composable () -> Unit,
+     deviceSelectionScreen: @Composable () -> Unit,
+@@ -76,6 +77,16 @@ fun AppNavHost(
+             settingsScreen()
+         }
+ 
++        composable(
++            route = AppNavDestination.TrackpadGestureSettingsDestination.route,
++            enterTransition = enterTransition,
++            exitTransition = exitTransition,
++            popEnterTransition = popEnterTransition,
++            popExitTransition = popExitTransition
++        ) {
++            trackpadGestureSettingsScreen()
++        }
++
+         composable(
+             route = AppNavDestination.ThirdLibrariesDestination.route,
+             enterTransition = enterTransition,
+@@ -145,4 +156,4 @@ fun NavHostController.navigateTo(
+     this.navigate(route) {
+         this.launchSingleTop = launchSingleTop
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt b/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt
+index 8527ba8..88abfc8 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt
+@@ -68,6 +68,7 @@ import org.koin.androidx.compose.koinViewModel
+ fun SettingsScreen(
+     navigateUp: () -> Unit,
+     navigateToThirdLibrariesScreen: () -> Unit,
++    navigateToTrackpadGestureSettingsScreen: () -> Unit,
+     modifier: Modifier = Modifier,
+     settingsViewModel: SettingsViewModel = koinViewModel(),
+     context: Context = LocalContext.current,
+@@ -329,6 +330,22 @@ fun SettingsScreen(
+                     )
+             )
+ 
++            Column(
++                modifier = Modifier
++                    .clickable { navigateToTrackpadGestureSettingsScreen() }
++                    .fillMaxWidth()
++                    .padding(
++                        horizontal = horizontalPadding,
++                        vertical = verticalPadding
++                    ),
++                verticalArrangement = Arrangement.spacedBy(dimensionResource(id = R.dimen.padding_min))
++            ) {
++                TextNormal(text = stringResource(id = R.string.trackpad_gestures_and_haptics))
++                TextNormalSecondary(
++                    text = stringResource(id = R.string.trackpad_gestures_and_haptics_info)
++                )
++            }
++
+             SettingsSwitch(
+                 primaryText = stringResource(id = R.string.use_the_gyroscope_to_control_the_mouse),
+                 secondaryText = null,
+@@ -625,7 +642,7 @@ private fun SettingsRemoteNavigationSelector(
+ // --- Reusable components ----
+ 
+ @Composable
+-private fun <T> SettingsListDialog(
++internal fun <T> SettingsListDialog(
+     @StringRes title: Int,
+     dialogMessage: String?,
+     value: T,
+@@ -689,16 +706,17 @@ private fun <T> StatelessSettingsListDialog(
+ }
+ 
+ @Composable
+-private fun SettingsSwitch(
++internal fun SettingsSwitch(
+     primaryText: String,
+     secondaryText: String?,
+     checked: Boolean,
+     onCheckedChange: (Boolean) -> Unit,
+-    modifier: Modifier = Modifier
++    modifier: Modifier = Modifier,
++    enabled: Boolean = true
+ ) {
+     Row(
+         modifier = Modifier
+-            .clickable { onCheckedChange(!checked) }
++            .clickable(enabled = enabled) { onCheckedChange(!checked) }
+             .then(modifier),
+         horizontalArrangement = Arrangement.SpaceBetween,
+         verticalAlignment = Alignment.CenterVertically
+@@ -715,7 +733,8 @@ private fun SettingsSwitch(
+ 
+         Switch(
+             checked = checked,
+-            onCheckedChange = null//onCheckedChange
++            onCheckedChange = null,//onCheckedChange
++            enabled = enabled
+         )
+     }
+ }
+@@ -744,7 +763,7 @@ private fun SettingsSlider(
+ }
+ 
+ @Composable
+-private fun SettingsTitle(
++internal fun SettingsTitle(
+     text: String,
+     icon: ImageVector,
+     iconDescription: String,
+diff --git a/app/src/main/java/com/atharok/btremote/ui/screens/TrackpadGestureSettingsScreen.kt b/app/src/main/java/com/atharok/btremote/ui/screens/TrackpadGestureSettingsScreen.kt
+new file mode 100644
+index 0000000..7b370b7
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/ui/screens/TrackpadGestureSettingsScreen.kt
+@@ -0,0 +1,345 @@
++package com.atharok.btremote.ui.screens
++
++import android.content.Context
++import androidx.annotation.StringRes
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.material3.HorizontalDivider
++import androidx.compose.material3.MultiChoiceSegmentedButtonRow
++import androidx.compose.material3.SegmentedButton
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.dimensionResource
++import androidx.compose.ui.res.stringResource
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
++import com.atharok.btremote.R
++import com.atharok.btremote.common.utils.AppIcons
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
++import com.atharok.btremote.domain.entities.settings.HapticIntensity
++import com.atharok.btremote.domain.entities.settings.HapticSettings
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
++import com.atharok.btremote.presentation.viewmodel.SettingsViewModel
++import com.atharok.btremote.ui.components.AppScaffold
++import com.atharok.btremote.ui.components.NavigateUpIconButton
++import com.atharok.btremote.ui.components.TextNormal
++import com.atharok.btremote.ui.components.TextNormalSecondary
++import org.koin.androidx.compose.koinViewModel
++
++@Composable
++fun TrackpadGestureSettingsScreen(
++    navigateUp: () -> Unit,
++    modifier: Modifier = Modifier,
++    settingsViewModel: SettingsViewModel = koinViewModel()
++) {
++    val trackpadSettings by settingsViewModel.trackpadSettingsFlow
++        .collectAsStateWithLifecycle(TrackpadSettings())
++    val hapticSettings by settingsViewModel.hapticSettingsFlow
++        .collectAsStateWithLifecycle(HapticSettings())
++
++    AppScaffold(
++        title = stringResource(id = R.string.trackpad_gestures_and_haptics),
++        modifier = modifier,
++        navigateUp = {
++            NavigateUpIconButton(navigateUp)
++        }
++    ) { innerPadding ->
++        val horizontalPadding = dimensionResource(id = R.dimen.padding_max)
++        val verticalPadding = dimensionResource(id = R.dimen.padding_large)
++        val itemModifier = Modifier
++            .fillMaxWidth()
++            .padding(horizontal = horizontalPadding, vertical = verticalPadding)
++
++        Column(
++            modifier = Modifier
++                .verticalScroll(rememberScrollState())
++                .padding(innerPadding)
++        ) {
++            SettingsTitle(
++                text = stringResource(id = R.string.trackpad_gestures),
++                icon = AppIcons.Gesture,
++                iconDescription = stringResource(id = R.string.trackpad_gestures),
++                modifier = itemModifier
++            )
++
++            SettingsSwitch(
++                primaryText = stringResource(id = R.string.double_tap_drag),
++                secondaryText = stringResource(id = R.string.double_tap_drag_info),
++                checked = trackpadSettings.doubleTapDragEnabled,
++                onCheckedChange = { settingsViewModel.saveDoubleTapDragEnabled(it) },
++                modifier = itemModifier
++            )
++
++            GestureActionSetting(
++                title = R.string.pinch_gesture,
++                value = trackpadSettings.pinchAction,
++                onValueChange = { settingsViewModel.savePinchAction(it) },
++                modifier = itemModifier
++            )
++
++            GestureActionSetting(
++                title = R.string.rotation_gesture,
++                value = trackpadSettings.rotationAction,
++                onValueChange = { settingsViewModel.saveRotationAction(it) },
++                modifier = itemModifier
++            )
++
++            HorizontalDivider(
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .padding(vertical = verticalPadding)
++            )
++
++            SettingsTitle(
++                text = stringResource(id = R.string.three_finger_gestures),
++                icon = AppIcons.Gesture,
++                iconDescription = stringResource(id = R.string.three_finger_gestures),
++                modifier = itemModifier
++            )
++
++            GestureActionSetting(
++                title = R.string.three_finger_swipe_up,
++                value = trackpadSettings.threeFingerSwipeUp,
++                onValueChange = { settingsViewModel.saveThreeFingerSwipeUp(it) },
++                modifier = itemModifier
++            )
++            GestureActionSetting(
++                title = R.string.three_finger_swipe_down,
++                value = trackpadSettings.threeFingerSwipeDown,
++                onValueChange = { settingsViewModel.saveThreeFingerSwipeDown(it) },
++                modifier = itemModifier
++            )
++            GestureActionSetting(
++                title = R.string.three_finger_swipe_left,
++                value = trackpadSettings.threeFingerSwipeLeft,
++                onValueChange = { settingsViewModel.saveThreeFingerSwipeLeft(it) },
++                modifier = itemModifier
++            )
++            GestureActionSetting(
++                title = R.string.three_finger_swipe_right,
++                value = trackpadSettings.threeFingerSwipeRight,
++                onValueChange = { settingsViewModel.saveThreeFingerSwipeRight(it) },
++                modifier = itemModifier
++            )
++            GestureActionSetting(
++                title = R.string.three_finger_tap,
++                value = trackpadSettings.threeFingerTap,
++                onValueChange = { settingsViewModel.saveThreeFingerTap(it) },
++                modifier = itemModifier
++            )
++
++            HorizontalDivider(
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .padding(vertical = verticalPadding)
++            )
++
++            SettingsTitle(
++                text = stringResource(id = R.string.four_finger_gestures),
++                icon = AppIcons.Gesture,
++                iconDescription = stringResource(id = R.string.four_finger_gestures),
++                modifier = itemModifier
++            )
++
++            GestureActionSetting(
++                title = R.string.four_finger_swipe_up,
++                value = trackpadSettings.fourFingerSwipeUp,
++                onValueChange = { settingsViewModel.saveFourFingerSwipeUp(it) },
++                modifier = itemModifier
++            )
++            GestureActionSetting(
++                title = R.string.four_finger_swipe_down,
++                value = trackpadSettings.fourFingerSwipeDown,
++                onValueChange = { settingsViewModel.saveFourFingerSwipeDown(it) },
++                modifier = itemModifier
++            )
++            GestureActionSetting(
++                title = R.string.four_finger_swipe_left,
++                value = trackpadSettings.fourFingerSwipeLeft,
++                onValueChange = { settingsViewModel.saveFourFingerSwipeLeft(it) },
++                modifier = itemModifier
++            )
++            GestureActionSetting(
++                title = R.string.four_finger_swipe_right,
++                value = trackpadSettings.fourFingerSwipeRight,
++                onValueChange = { settingsViewModel.saveFourFingerSwipeRight(it) },
++                modifier = itemModifier
++            )
++            GestureActionSetting(
++                title = R.string.four_finger_tap,
++                value = trackpadSettings.fourFingerTap,
++                onValueChange = { settingsViewModel.saveFourFingerTap(it) },
++                modifier = itemModifier
++            )
++
++            HorizontalDivider(
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .padding(vertical = verticalPadding)
++            )
++
++            SettingsTitle(
++                text = stringResource(id = R.string.haptics),
++                icon = AppIcons.Settings,
++                iconDescription = stringResource(id = R.string.haptics),
++                modifier = itemModifier
++            )
++
++            SettingsSwitch(
++                primaryText = stringResource(id = R.string.haptics_enabled),
++                secondaryText = stringResource(id = R.string.haptics_info),
++                checked = hapticSettings.enabled,
++                onCheckedChange = { settingsViewModel.saveHapticsEnabled(it) },
++                modifier = itemModifier
++            )
++
++            if (hapticSettings.enabled) {
++                HapticIntensitySetting(
++                    intensity = hapticSettings.intensity,
++                    onIntensityChange = { settingsViewModel.saveHapticsIntensity(it) },
++                    modifier = itemModifier
++                )
++
++                Column(
++                    modifier = Modifier.padding(start = horizontalPadding),
++                    verticalArrangement = Arrangement.spacedBy(verticalPadding)
++                ) {
++                    SettingsSwitch(
++                        primaryText = stringResource(id = R.string.haptics_trackpad),
++                        secondaryText = null,
++                        checked = hapticSettings.trackpad,
++                        onCheckedChange = { settingsViewModel.saveHapticsTrackpad(it) },
++                        modifier = Modifier
++                            .fillMaxWidth()
++                            .padding(end = horizontalPadding)
++                    )
++                    SettingsSwitch(
++                        primaryText = stringResource(id = R.string.haptics_scroll),
++                        secondaryText = stringResource(id = R.string.haptics_scroll_info),
++                        checked = hapticSettings.scroll,
++                        onCheckedChange = { settingsViewModel.saveHapticsScroll(it) },
++                        modifier = Modifier
++                            .fillMaxWidth()
++                            .padding(end = horizontalPadding),
++                        enabled = hapticSettings.trackpad
++                    )
++                    SettingsSwitch(
++                        primaryText = stringResource(id = R.string.haptics_keyboard),
++                        secondaryText = null,
++                        checked = hapticSettings.keyboard,
++                        onCheckedChange = { settingsViewModel.saveHapticsKeyboard(it) },
++                        modifier = Modifier
++                            .fillMaxWidth()
++                            .padding(end = horizontalPadding)
++                    )
++                }
++
++                TextNormalSecondary(
++                    text = stringResource(id = R.string.haptics_system_info),
++                    modifier = itemModifier
++                )
++            }
++        }
++    }
++}
++
++@Composable
++private fun GestureActionSetting(
++    @StringRes title: Int,
++    value: TrackpadGestureAction,
++    onValueChange: (TrackpadGestureAction) -> Unit,
++    modifier: Modifier = Modifier
++) {
++    val context = LocalContext.current
++    SettingsListDialog(
++        title = title,
++        dialogMessage = stringResource(id = R.string.gesture_mapping_info),
++        value = value,
++        onValueChange = onValueChange,
++        items = TrackpadGestureAction.entries,
++        convertValueToString = { gestureActionLabel(context, it) },
++        modifier = modifier
++    )
++}
++
++@Composable
++private fun HapticIntensitySetting(
++    intensity: HapticIntensity,
++    onIntensityChange: (HapticIntensity) -> Unit,
++    modifier: Modifier = Modifier
++) {
++    Column(
++        modifier = modifier,
++        verticalArrangement = Arrangement.spacedBy(dimensionResource(id = R.dimen.padding_small))
++    ) {
++        TextNormal(text = stringResource(id = R.string.haptics_intensity))
++        MultiChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
++            HapticIntensity.entries.forEachIndexed { index, item ->
++                SegmentedButton(
++                    checked = item == intensity,
++                    onCheckedChange = { onIntensityChange(item) },
++                    shape = hapticSegmentShape(index),
++                ) {
++                    TextNormal(text = stringResource(id = item.titleRes()))
++                }
++            }
++        }
++        TextNormalSecondary(text = stringResource(id = R.string.haptics_intensity_info))
++    }
++}
++
++private fun hapticSegmentShape(index: Int): RoundedCornerShape = when (index) {
++    0 -> RoundedCornerShape(
++        topStartPercent = 50,
++        topEndPercent = 0,
++        bottomEndPercent = 0,
++        bottomStartPercent = 50
++    )
++    HapticIntensity.entries.lastIndex -> RoundedCornerShape(
++        topStartPercent = 0,
++        topEndPercent = 50,
++        bottomEndPercent = 50,
++        bottomStartPercent = 0
++    )
++    else -> RoundedCornerShape(percent = 0)
++}
++
++private fun gestureActionLabel(context: Context, action: TrackpadGestureAction): String {
++    val title = context.getString(action.titleRes())
++    return if (action.shortcutHint.isBlank()) title else "$title  ${action.shortcutHint}"
++}
++
++@StringRes
++private fun TrackpadGestureAction.titleRes(): Int = when (this) {
++    TrackpadGestureAction.NONE -> R.string.gesture_action_none
++    TrackpadGestureAction.APP_SWITCHER -> R.string.gesture_action_app_switcher
++    TrackpadGestureAction.HOME -> R.string.gesture_action_home
++    TrackpadGestureAction.DOCK -> R.string.gesture_action_dock
++    TrackpadGestureAction.PREVIOUS_APP -> R.string.gesture_action_previous_app
++    TrackpadGestureAction.NEXT_APP -> R.string.gesture_action_next_app
++    TrackpadGestureAction.SPOTLIGHT -> R.string.gesture_action_spotlight
++    TrackpadGestureAction.CONTROL_CENTER -> R.string.gesture_action_control_center
++    TrackpadGestureAction.NOTIFICATION_CENTER -> R.string.gesture_action_notification_center
++    TrackpadGestureAction.MISSION_CONTROL -> R.string.gesture_action_mission_control
++    TrackpadGestureAction.APP_EXPOSE -> R.string.gesture_action_app_expose
++    TrackpadGestureAction.SWITCH_SPACE_LEFT -> R.string.gesture_action_switch_space_left
++    TrackpadGestureAction.SWITCH_SPACE_RIGHT -> R.string.gesture_action_switch_space_right
++    TrackpadGestureAction.SCREENSHOT -> R.string.gesture_action_screenshot
++    TrackpadGestureAction.MIDDLE_CLICK -> R.string.gesture_action_middle_click
++    TrackpadGestureAction.ZOOM -> R.string.gesture_action_zoom
++    TrackpadGestureAction.ROTATE_LEFT -> R.string.gesture_action_rotate_left
++    TrackpadGestureAction.ROTATE_RIGHT -> R.string.gesture_action_rotate_right
++}
++
++@StringRes
++private fun HapticIntensity.titleRes(): Int = when (this) {
++    HapticIntensity.LIGHT -> R.string.haptics_intensity_light
++    HapticIntensity.MEDIUM -> R.string.haptics_intensity_medium
++    HapticIntensity.STRONG -> R.string.haptics_intensity_strong
++}
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index fb91170..62ca84a 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -208,6 +208,57 @@
+     <string name="favorites">收藏</string>
+     <string name="add_to_favorites">添加到收藏</string>
+     <string name="advanced_options">高级选项</string>
++    <string name="trackpad_gestures_and_haptics">触控板手势与振动</string>
++    <string name="trackpad_gestures_and_haptics_info">配置 MacBook 风格手势、快捷键映射和振动反馈。</string>
++    <string name="trackpad_gestures">触控板手势</string>
++    <string name="double_tap_drag">双击并拖拽</string>
++    <string name="double_tap_drag_info">不抬起手指连续点按两次，然后用单指拖拽。</string>
++    <string name="pinch_gesture">捏合</string>
++    <string name="rotation_gesture">旋转</string>
++    <string name="gesture_mapping_info">选择该手势发送的快捷键或鼠标操作。</string>
++    <string name="three_finger_gestures">三指手势</string>
++    <string name="four_finger_gestures">四指手势</string>
++    <string name="three_finger_swipe_up">三指上滑</string>
++    <string name="three_finger_swipe_down">三指下滑</string>
++    <string name="three_finger_swipe_left">三指左滑</string>
++    <string name="three_finger_swipe_right">三指右滑</string>
++    <string name="three_finger_tap">三指点按</string>
++    <string name="four_finger_swipe_up">四指上滑</string>
++    <string name="four_finger_swipe_down">四指下滑</string>
++    <string name="four_finger_swipe_left">四指左滑</string>
++    <string name="four_finger_swipe_right">四指右滑</string>
++    <string name="four_finger_tap">四指点按</string>
++    <string name="haptics">振动反馈</string>
++    <string name="haptics_enabled">启用振动</string>
++    <string name="haptics_info">使用设备振动马达。Android 系统触感反馈设置也可能影响实际效果。</string>
++    <string name="haptics_intensity">振动强度</string>
++    <string name="haptics_intensity_info">设置触控板、滚动、键盘和遥控按键振动的手感。</string>
++    <string name="haptics_trackpad">触控板与手势反馈</string>
++    <string name="haptics_scroll">滚动反馈</string>
++    <string name="haptics_scroll_info">需要先启用触控板振动。</string>
++    <string name="haptics_keyboard">键盘与遥控按键</string>
++    <string name="haptics_system_info">系统振动设置可能会减弱或关闭反馈。</string>
++    <string name="haptics_intensity_light">轻</string>
++    <string name="haptics_intensity_medium">中</string>
++    <string name="haptics_intensity_strong">强</string>
++    <string name="gesture_action_none">无操作</string>
++    <string name="gesture_action_app_switcher">切换应用</string>
++    <string name="gesture_action_home">主页</string>
++    <string name="gesture_action_dock">程序坞</string>
++    <string name="gesture_action_previous_app">上一个应用</string>
++    <string name="gesture_action_next_app">下一个应用</string>
++    <string name="gesture_action_spotlight">聚焦搜索</string>
++    <string name="gesture_action_control_center">控制中心</string>
++    <string name="gesture_action_notification_center">通知中心</string>
++    <string name="gesture_action_mission_control">调度中心</string>
++    <string name="gesture_action_app_expose">应用窗口</string>
++    <string name="gesture_action_switch_space_left">切换到左侧空间</string>
++    <string name="gesture_action_switch_space_right">切换到右侧空间</string>
++    <string name="gesture_action_screenshot">截屏</string>
++    <string name="gesture_action_middle_click">单击中键</string>
++    <string name="gesture_action_zoom">缩放</string>
++    <string name="gesture_action_rotate_left">向左旋转</string>
++    <string name="gesture_action_rotate_right">向右旋转</string>
+     <string name="connect">连接</string>
+     <string name="media_controls">媒体控制</string>
+     <string name="no_device_registered">此设备上未注册任何设备。</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index f0b9130..09dba14 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -133,6 +133,57 @@
+     <string name="assign_action_volume_up_button">Assign an action to the volume up button</string>
+     <string name="assign_action_volume_down_button">Assign an action to the volume down button</string>
+     <string name="advanced_options">Advanced Options</string>
++    <string name="trackpad_gestures_and_haptics">Trackpad gestures and haptics</string>
++    <string name="trackpad_gestures_and_haptics_info">Configure MacBook-style gestures, shortcut mappings, and vibration feedback.</string>
++    <string name="trackpad_gestures">Trackpad gestures</string>
++    <string name="double_tap_drag">Double-tap and drag</string>
++    <string name="double_tap_drag_info">Tap twice without lifting, then drag with one finger.</string>
++    <string name="pinch_gesture">Pinch</string>
++    <string name="rotation_gesture">Rotate</string>
++    <string name="gesture_mapping_info">Choose the shortcut or mouse action sent by this gesture.</string>
++    <string name="three_finger_gestures">Three-finger gestures</string>
++    <string name="four_finger_gestures">Four-finger gestures</string>
++    <string name="three_finger_swipe_up">Three-finger swipe up</string>
++    <string name="three_finger_swipe_down">Three-finger swipe down</string>
++    <string name="three_finger_swipe_left">Three-finger swipe left</string>
++    <string name="three_finger_swipe_right">Three-finger swipe right</string>
++    <string name="three_finger_tap">Three-finger tap</string>
++    <string name="four_finger_swipe_up">Four-finger swipe up</string>
++    <string name="four_finger_swipe_down">Four-finger swipe down</string>
++    <string name="four_finger_swipe_left">Four-finger swipe left</string>
++    <string name="four_finger_swipe_right">Four-finger swipe right</string>
++    <string name="four_finger_tap">Four-finger tap</string>
++    <string name="haptics">Vibration feedback</string>
++    <string name="haptics_enabled">Enable vibration</string>
++    <string name="haptics_info">Uses the device vibration motor. Android system touch feedback settings can also affect the result.</string>
++    <string name="haptics_intensity">Strength</string>
++    <string name="haptics_intensity_info">Choose how firm trackpad, scroll, keyboard, and remote-button feedback feels.</string>
++    <string name="haptics_trackpad">Trackpad and gesture feedback</string>
++    <string name="haptics_scroll">Scroll feedback</string>
++    <string name="haptics_scroll_info">Requires trackpad vibration to be enabled.</string>
++    <string name="haptics_keyboard">Keyboard and remote buttons</string>
++    <string name="haptics_system_info">System vibration settings may reduce or disable feedback.</string>
++    <string name="haptics_intensity_light">Light</string>
++    <string name="haptics_intensity_medium">Medium</string>
++    <string name="haptics_intensity_strong">Strong</string>
++    <string name="gesture_action_none">None</string>
++    <string name="gesture_action_app_switcher">App Switcher</string>
++    <string name="gesture_action_home">Home</string>
++    <string name="gesture_action_dock">Dock</string>
++    <string name="gesture_action_previous_app">Previous App</string>
++    <string name="gesture_action_next_app">Next App</string>
++    <string name="gesture_action_spotlight">Spotlight</string>
++    <string name="gesture_action_control_center">Control Center</string>
++    <string name="gesture_action_notification_center">Notification Center</string>
++    <string name="gesture_action_mission_control">Mission Control</string>
++    <string name="gesture_action_app_expose">App Exposé</string>
++    <string name="gesture_action_switch_space_left">Switch Space Left</string>
++    <string name="gesture_action_switch_space_right">Switch Space Right</string>
++    <string name="gesture_action_screenshot">Screenshot</string>
++    <string name="gesture_action_middle_click">Middle Click</string>
++    <string name="gesture_action_zoom">Zoom</string>
++    <string name="gesture_action_rotate_left">Rotate Left</string>
++    <string name="gesture_action_rotate_right">Rotate Right</string>
+     <string name="show_remote_buttons_in_notification">Show remote buttons in notification</string>
+     <string name="hide_bluetooth_activation_button">Hide Bluetooth activation button at app startup</string>
+     <string name="disconnect_on_background">Disconnect completely when the app leaves the foreground</string>
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureActionTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureActionTest.kt
+index 4c180c5..fbe75b9 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureActionTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureActionTest.kt
+@@ -120,6 +120,32 @@ class TrackpadGestureActionTest {
+         }
+     }
+ 
++    @Test
++    fun shortcutHintsMatchTheConfiguredMacChords() {
++        val expected = mapOf(
++            TrackpadGestureAction.NONE to "",
++            TrackpadGestureAction.APP_SWITCHER to "⌘↑",
++            TrackpadGestureAction.HOME to "⌘H",
++            TrackpadGestureAction.DOCK to "⌃⌥A",
++            TrackpadGestureAction.PREVIOUS_APP to "⇧⌘Tab",
++            TrackpadGestureAction.NEXT_APP to "⌘Tab",
++            TrackpadGestureAction.SPOTLIGHT to "⌘Space",
++            TrackpadGestureAction.CONTROL_CENTER to "⌃⌥C",
++            TrackpadGestureAction.NOTIFICATION_CENTER to "⌃⌥N",
++            TrackpadGestureAction.MISSION_CONTROL to "⌃↑",
++            TrackpadGestureAction.APP_EXPOSE to "⌃↓",
++            TrackpadGestureAction.SWITCH_SPACE_LEFT to "⌃←",
++            TrackpadGestureAction.SWITCH_SPACE_RIGHT to "⌃→",
++            TrackpadGestureAction.SCREENSHOT to "⇧⌘3",
++            TrackpadGestureAction.MIDDLE_CLICK to "Middle click",
++            TrackpadGestureAction.ZOOM to "⌘= / ⌘-",
++            TrackpadGestureAction.ROTATE_LEFT to "⌥⌘R",
++            TrackpadGestureAction.ROTATE_RIGHT to "⌘R"
++        )
++
++        assertEquals(expected, TrackpadGestureAction.entries.associateWith { it.shortcutHint })
++    }
++
+     private companion object {
+         const val SHIFT = 0x02
+         const val CTRL = 0x01

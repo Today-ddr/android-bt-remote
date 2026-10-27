@@ -1,0 +1,201 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 01:28:22 +0800
+Subject: [PATCH] =?UTF-8?q?feat(haptics):=20=E6=8E=A5=E5=85=A5=20Android?=
+ =?UTF-8?q?=20=E6=8C=AF=E5=8A=A8=E5=8F=8D=E9=A6=88?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 按系统版本选择 VibratorManager 或 Vibrator
+- 支持振幅控制并回退到短 one-shot
+- 使用可注入 sink 覆盖门控、强度与滚动限流
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 498c507..4b2ad12 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -18,6 +18,7 @@
+     <uses-permission
+         android:name="android.permission.ACCESS_COARSE_LOCATION"
+         android:maxSdkVersion="30"/>
++    <uses-permission android:name="android.permission.VIBRATE" />
+ 
+     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+@@ -87,4 +88,4 @@
+ 
+     </application>
+ 
+-</manifest>
+\ No newline at end of file
++</manifest>
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/haptics/AndroidHapticFeedbackController.kt b/app/src/main/java/com/atharok/btremote/presentation/haptics/AndroidHapticFeedbackController.kt
+new file mode 100644
+index 0000000..bdc38dd
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/presentation/haptics/AndroidHapticFeedbackController.kt
+@@ -0,0 +1,66 @@
++package com.atharok.btremote.presentation.haptics
++
++import android.content.Context
++import android.os.Build
++import android.os.SystemClock
++import android.os.VibrationEffect
++import android.os.Vibrator
++import android.os.VibratorManager
++import com.atharok.btremote.domain.entities.settings.HapticSettings
++import com.atharok.btremote.domain.haptics.HapticPolicy
++import com.atharok.btremote.domain.haptics.HapticSource
++
++internal fun interface VibrationSink {
++    fun vibrate(durationMillis: Long, amplitude: Int?)
++}
++
++class AndroidHapticFeedbackController internal constructor(
++    private val vibrationSink: VibrationSink,
++    private val clockMillis: () -> Long = SystemClock::elapsedRealtime
++) {
++
++    private var lastScrollTickMillis: Long? = null
++
++    fun tap(settings: HapticSettings, source: HapticSource) {
++        if (!HapticPolicy.shouldTap(settings, source)) return
++        vibrationSink.vibrate(TAP_DURATION_MILLIS, HapticPolicy.amplitude(settings))
++    }
++
++    fun scrollTick(settings: HapticSettings) {
++        val nowMillis = clockMillis()
++        if (!HapticPolicy.shouldEmitScroll(settings, lastScrollTickMillis, nowMillis)) return
++
++        lastScrollTickMillis = nowMillis
++        vibrationSink.vibrate(SCROLL_DURATION_MILLIS, HapticPolicy.amplitude(settings))
++    }
++
++    companion object {
++
++        internal const val TAP_DURATION_MILLIS = 20L
++        internal const val SCROLL_DURATION_MILLIS = 10L
++
++        fun from(context: Context): AndroidHapticFeedbackController {
++            val appContext = context.applicationContext ?: context
++            return AndroidHapticFeedbackController(AndroidVibrationSink(appContext))
++        }
++    }
++}
++
++private class AndroidVibrationSink(context: Context) : VibrationSink {
++
++    private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++        context.getSystemService(VibratorManager::class.java)?.defaultVibrator
++    } else {
++        context.getSystemService(Vibrator::class.java)
++    }
++
++    override fun vibrate(durationMillis: Long, amplitude: Int?) {
++        val target = vibrator?.takeIf { it.hasVibrator() } ?: return
++        val effect = if (amplitude != null && target.hasAmplitudeControl()) {
++            VibrationEffect.createOneShot(durationMillis, amplitude.coerceIn(1, 255))
++        } else {
++            VibrationEffect.createOneShot(durationMillis, VibrationEffect.DEFAULT_AMPLITUDE)
++        }
++        target.vibrate(effect)
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/presentation/haptics/AndroidHapticFeedbackControllerTest.kt b/app/src/test/java/com/atharok/btremote/presentation/haptics/AndroidHapticFeedbackControllerTest.kt
+new file mode 100644
+index 0000000..a7936e5
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/presentation/haptics/AndroidHapticFeedbackControllerTest.kt
+@@ -0,0 +1,91 @@
++package com.atharok.btremote.presentation.haptics
++
++import com.atharok.btremote.domain.entities.settings.HapticSettings
++import com.atharok.btremote.domain.haptics.HapticSource
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class AndroidHapticFeedbackControllerTest {
++
++    private val sink = RecordingVibrationSink()
++    private var nowMillis = 0L
++    private val controller = AndroidHapticFeedbackController(
++        vibrationSink = sink,
++        clockMillis = { nowMillis }
++    )
++
++    @Test
++    fun disabledSettingsSendNothing() {
++        val disabled = HapticSettings(enabled = false)
++
++        controller.tap(disabled, HapticSource.TRACKPAD)
++        controller.tap(disabled, HapticSource.KEYBOARD)
++        controller.scrollTick(disabled)
++
++        assertTrue(sink.events.isEmpty())
++    }
++
++    @Test
++    fun enabledTapUsesStrongAmplitudeAndShortDuration() {
++        controller.tap(HapticSettings(), HapticSource.TRACKPAD)
++
++        assertEquals(
++            listOf(VibrationEvent(durationMillis = 20, amplitude = 255)),
++            sink.events
++        )
++    }
++
++    @Test
++    fun keyboardGroupGatesKeyboardTaps() {
++        controller.tap(
++            HapticSettings(trackpad = false, keyboard = true),
++            HapticSource.KEYBOARD
++        )
++        controller.tap(
++            HapticSettings(trackpad = true, keyboard = false),
++            HapticSource.KEYBOARD
++        )
++
++        assertEquals(1, sink.events.size)
++        assertEquals(255, sink.events.single().amplitude)
++    }
++
++    @Test
++    fun scrollTicksRespectFortyMillisecondLimit() {
++        nowMillis = 100
++        controller.scrollTick(HapticSettings())
++        nowMillis = 139
++        controller.scrollTick(HapticSettings())
++        nowMillis = 140
++        controller.scrollTick(HapticSettings())
++
++        assertEquals(
++            listOf(
++                VibrationEvent(durationMillis = 10, amplitude = 255),
++                VibrationEvent(durationMillis = 10, amplitude = 255)
++            ),
++            sink.events
++        )
++    }
++
++    @Test
++    fun scrollRequiresTrackpadGroup() {
++        controller.scrollTick(HapticSettings(trackpad = false))
++
++        assertTrue(sink.events.isEmpty())
++    }
++
++    private class RecordingVibrationSink : VibrationSink {
++        val events = mutableListOf<VibrationEvent>()
++
++        override fun vibrate(durationMillis: Long, amplitude: Int?) {
++            events += VibrationEvent(durationMillis, amplitude)
++        }
++    }
++
++    private data class VibrationEvent(
++        val durationMillis: Long,
++        val amplitude: Int?
++    )
++}
