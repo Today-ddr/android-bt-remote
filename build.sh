@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-VERSION_CODE="9"
-VERSION_NAME="0.0.9"
+VERSION_CODE="10"
+VERSION_NAME="0.1.0"
 
 set -euo pipefail
 rm -rf .git/modules/src/rebase-apply

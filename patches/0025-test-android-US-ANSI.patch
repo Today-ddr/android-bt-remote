@@ -1,0 +1,1169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 22:08:12 +0800
+Subject: [PATCH] =?UTF-8?q?test(android):=20=E8=A6=86=E7=9B=96=20US=20ANSI?=
+ =?UTF-8?q?=E3=80=81=E9=95=BF=E6=8C=89=E6=8B=96=E6=8B=BD=E3=80=81=E6=BB=9A?=
+ =?UTF-8?q?=E5=8A=A8=E4=B8=8E=E9=87=8A=E6=94=BE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 断言固定 US ANSI 六行各 15 单位、功能行无 PrtSc/Del
+- 覆盖长按 0.35s 规则、第二指取消、五指不识别与拖拽不触发点击
+- 覆盖右侧滚动步进/反转、键盘多指引用计数与统一释放幂等
+
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/InputReleaseCoordinatorTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/InputReleaseCoordinatorTest.kt
+new file mode 100644
+index 0000000..1f4ac12
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/InputReleaseCoordinatorTest.kt
+@@ -0,0 +1,51 @@
++package com.atharok.btremote.domain.entities.remoteInput
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class InputReleaseCoordinatorTest {
++
++    @Test
++    fun releasesRunInRegistrationOrder() {
++        val coordinator = InputReleaseCoordinator()
++        val order = mutableListOf<String>()
++        coordinator.register { order += "keyboard" }
++        coordinator.register { order += "trackpad" }
++
++        coordinator.releaseAll()
++
++        assertEquals(listOf("keyboard", "trackpad"), order)
++    }
++
++    @Test
++    fun unregisteredReleasesDoNotRun() {
++        val coordinator = InputReleaseCoordinator()
++        var calls = 0
++        val unregister = coordinator.register { calls += 1 }
++        unregister()
++
++        coordinator.releaseAll()
++
++        assertEquals(0, calls)
++    }
++
++    @Test
++    fun repeatedReleaseDoesNotProduceASecondButtonTransition() {
++        val coordinator = InputReleaseCoordinator()
++        var leftButtonDown = true
++        var transitions = 0
++        coordinator.register {
++            if (leftButtonDown) {
++                leftButtonDown = false
++                transitions += 1
++            }
++        }
++
++        coordinator.releaseAll()
++        coordinator.releaseAll()
++
++        assertEquals(1, transitions)
++        assertTrue(!leftButtonDown)
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt
+index 55425cc..2da675b 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt
+@@ -1,6 +1,7 @@
+ package com.atharok.btremote.domain.entities.remoteInput.keyboard
+ 
+ import org.junit.Assert.assertArrayEquals
++import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertFalse
+ import org.junit.Assert.assertTrue
+ import org.junit.Test
+@@ -101,17 +102,67 @@ class KeyboardReportStateTest {
+     }
+ 
+     @Test
+-    fun clearReleasesKeysModifiersAndCapsState() {
++    fun twoFingersOnTheSameKeyReleaseOnlyWhenTheLastFingerLeaves() {
++        val state = KeyboardReportState()
++
++        val first = state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
++        val second = state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
++        assertArrayEquals(
++            byteArrayOf(0, 0, KeyboardKey.ROW_3_KEY_00.byte, 0, 0, 0, 0, 0),
++            first
++        )
++        assertArrayEquals(first, second)
++
++        val afterFirstLift = state.releaseKey(KeyboardKey.ROW_3_KEY_00.byte)
++        assertArrayEquals(
++            byteArrayOf(0, 0, KeyboardKey.ROW_3_KEY_00.byte, 0, 0, 0, 0, 0),
++            afterFirstLift
++        )
++
++        assertArrayEquals(
++            ByteArray(8),
++            state.releaseKey(KeyboardKey.ROW_3_KEY_00.byte)
++        )
++    }
++
++    @Test
++    fun twoFingersOnTheSameModifierReleaseOnlyWhenTheLastFingerLeaves() {
++        val state = KeyboardReportState()
++
++        state.pressModifier(KeyboardKey.KEY_SHIFT_LEFT.byte)
++        state.pressModifier(KeyboardKey.KEY_SHIFT_LEFT.byte)
++        state.releaseModifier(KeyboardKey.KEY_SHIFT_LEFT.byte)
++
++        assertArrayEquals(
++            byteArrayOf(
++                KeyboardKey.KEY_SHIFT_LEFT.byte,
++                0,
++                KeyboardKey.ROW_3_KEY_00.byte,
++                0,
++                0,
++                0,
++                0,
++                0
++            ),
++            state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
++        )
++
++        state.releaseKey(KeyboardKey.ROW_3_KEY_00.byte)
++        assertArrayEquals(ByteArray(8), state.releaseModifier(KeyboardKey.KEY_SHIFT_LEFT.byte))
++    }
++
++    @Test
++    fun clearReleasesKeysAndModifiersButKeepsTheCapsLatch() {
+         val state = KeyboardReportState()
+         state.pressModifier(KeyboardKey.KEY_SHIFT_LEFT.byte)
+         state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
+         state.toggleCapsLock()
+ 
+         assertArrayEquals(ByteArray(8), state.clear())
+-        assertFalse(state.isCapsLockOn)
++        assertTrue(state.isCapsLockOn)
+         assertArrayEquals(
+             byteArrayOf(
+-                0,
++                KeyboardKey.KEY_SHIFT_LEFT.byte,
+                 0,
+                 KeyboardKey.ROW_3_KEY_00.byte,
+                 0,
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
+index 31c9678..ec0422f 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
+@@ -2,27 +2,7 @@ package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
+ 
+ import android.content.ContextWrapper
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLanguage
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardKey
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.ArabicAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.BulgarianAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.CzechAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.EnglishUKAdvancedKeyboardLayout
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.EnglishUSAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.FrenchAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.GermanAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.GreekAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.HebrewAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.PersianAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.PolishAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.PortugueseAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.PortugueseBRAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.RussianAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.SpanishAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.TurkishAdvancedKeyboardLayout
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.UkrainianAdvancedKeyboardLayout
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertTrue
+ import org.junit.Test
+@@ -31,246 +11,70 @@ class MacKeyboardLayoutFactoryTest {
+ 
+     // The factory only reads the language arrays, it never needs Android resources.
+     private val context = ContextWrapper(null)
++    private val layout = MacKeyboardLayoutFactory.build(EnglishUSAdvancedKeyboardLayout(context))
+ 
+-    private val englishUs = EnglishUSAdvancedKeyboardLayout(context)
+-    private val englishUk = EnglishUKAdvancedKeyboardLayout(context)
+-    private val spanish = SpanishAdvancedKeyboardLayout(context)
+-    private val french = FrenchAdvancedKeyboardLayout(context)
+-    private val german = GermanAdvancedKeyboardLayout(context)
+-    private val russian = RussianAdvancedKeyboardLayout(context)
+-    private val czech = CzechAdvancedKeyboardLayout(context)
+-    private val polish = PolishAdvancedKeyboardLayout(context)
+-    private val portuguese = PortugueseAdvancedKeyboardLayout(context)
+-    private val portugueseBr = PortugueseBRAdvancedKeyboardLayout(context)
+-    private val greek = GreekAdvancedKeyboardLayout(context)
+-    private val turkish = TurkishAdvancedKeyboardLayout(context)
+-    private val hebrew = HebrewAdvancedKeyboardLayout(context)
+-    private val bulgarian = BulgarianAdvancedKeyboardLayout(context)
+-    private val ukrainian = UkrainianAdvancedKeyboardLayout(context)
+-    private val persian = PersianAdvancedKeyboardLayout(context)
+-    private val arabic = ArabicAdvancedKeyboardLayout(context)
+-
+-    private val allLayouts: List<AdvancedKeyboardLayout> = listOf(
+-        englishUs,
+-        englishUk,
+-        spanish,
+-        french,
+-        german,
+-        russian,
+-        czech,
+-        polish,
+-        portuguese,
+-        portugueseBr,
+-        greek,
+-        turkish,
+-        hebrew,
+-        bulgarian,
+-        ukrainian,
+-        persian,
+-        arabic
+-    )
+-
+-    private val layoutLanguages = mapOf(
+-        englishUs to KeyboardLanguage.ENGLISH_US,
+-        englishUk to KeyboardLanguage.ENGLISH_UK,
+-        spanish to KeyboardLanguage.SPANISH,
+-        french to KeyboardLanguage.FRENCH,
+-        german to KeyboardLanguage.GERMAN,
+-        russian to KeyboardLanguage.RUSSIAN,
+-        czech to KeyboardLanguage.CZECH,
+-        polish to KeyboardLanguage.POLISH,
+-        portuguese to KeyboardLanguage.PORTUGUESE,
+-        portugueseBr to KeyboardLanguage.BRAZILIAN,
+-        greek to KeyboardLanguage.GREEK,
+-        turkish to KeyboardLanguage.TURKISH,
+-        hebrew to KeyboardLanguage.HEBREW,
+-        bulgarian to KeyboardLanguage.BULGARIAN,
+-        ukrainian to KeyboardLanguage.UKRAINIAN,
+-        persian to KeyboardLanguage.PERSIAN,
+-        arabic to KeyboardLanguage.ARABIC
+-    )
+-
+-    private val structuralKeys: List<MacKeyboardKey> =
+-        MacKeyboardSpec.functionRow.keys +
+-                listOf(
+-                    MacKeyboardSpec.tab,
+-                    MacKeyboardSpec.backspace,
+-                    MacKeyboardSpec.capsLock,
+-                    MacKeyboardSpec.enter,
+-                    MacKeyboardSpec.shiftLeft,
+-                    MacKeyboardSpec.shiftRight,
+-                    MacKeyboardSpec.upArrow
+-                ) +
+-                MacKeyboardSpec.bottomRow.keys
++    @Test
++    fun buildsSixRowsWithFifteenUnitsEach() {
++        assertEquals(6, layout.rows.size)
++        layout.rows.forEachIndexed { index, row ->
++            assertEquals("row $index", 15f, row.totalWeight, 0.001f)
++        }
++    }
+ 
+-    // A modifier is a bit in the first report byte while a usage is an array entry, so a key such
+-    // as F7 (0x40) legitimately shares its byte with the right Alt modifier bit.
+-    private val usageOrder = compareBy<Pair<Byte, AdvancedKeyBehavior>>(
+-        { it.first },
+-        { it.second.ordinal }
+-    )
++    @Test
++    fun numberRowStartsAtGraveAndEndsWithBackspace() {
++        val row = layout.rows[1]
+ 
+-    private fun sourceUsages(layout: AdvancedKeyboardLayout): List<Byte> =
+-        layout.line1.map { it.byte } +
+-                layout.line2.map { it.byte } +
+-                layout.line3.map { it.byte } +
+-                layout.line4.map { it.byte }
++        assertEquals(KeyboardKey.ROW_1_KEY_00.byte, row.keys.first().byte)
++        assertEquals(KeyboardKey.KEY_DELETE.byte, row.keys.last().byte)
++        assertEquals(14, row.keys.size)
++    }
+ 
+-    private fun build(layout: AdvancedKeyboardLayout): MacKeyboardLayout =
+-        MacKeyboardLayoutFactory.build(layout, layoutLanguages.getValue(layout))
++    @Test
++    fun qwertyRowCarriesTabAndTheAnsiBackslash() {
++        val row = layout.rows[2]
+ 
+-    private fun expectedSourceKeys(layout: AdvancedKeyboardLayout): List<AdvancedKeyboardKey> {
+-        val sourceKeys = (layout.line1 + layout.line2 + layout.line3 + layout.line4).toList()
+-        return if (layoutLanguages.getValue(layout) == KeyboardLanguage.ENGLISH_US) {
+-            sourceKeys.filterNot { it.byte == KeyboardKey.ROW_4_KEY_00.byte }
+-        } else {
+-            sourceKeys
+-        }
++        assertEquals(KeyboardKey.KEY_TAB.byte, row.keys.first().byte)
++        assertEquals(KeyboardKey.ROW_3_KEY_11.byte, row.keys.last().byte)
++        assertEquals(MacKeyboardKeyWeight.ROW_BACKSLASH, row.keys.last().weight, 0.001f)
+     }
+ 
+     @Test
+-    fun buildsSixNonEmptyRowsForEveryLanguage() {
+-        assertEquals(17, allLayouts.size)
++    fun homeRowStartsWithCapsLockAndEndsWithReturn() {
++        val row = layout.rows[3]
+ 
+-        allLayouts.forEach { layout ->
+-            val macLayout = build(layout)
+-
+-            assertEquals(layout.javaClass.simpleName, 6, macLayout.rows.size)
+-            assertTrue(layout.javaClass.simpleName, macLayout.rows.all { it.keys.isNotEmpty() })
+-        }
++        assertEquals(KeyboardKey.KEY_CAPS_LOCK.byte, row.keys.first().byte)
++        assertEquals(KeyboardKey.KEY_ENTER.byte, row.keys.last().byte)
++        assertEquals(MacKeyboardKeyWeight.CAPS_LOCK, row.keys.first().weight, 0.001f)
++        assertEquals(MacKeyboardKeyWeight.ENTER, row.keys.last().weight, 0.001f)
+     }
+ 
+     @Test
+-    fun preservesExpectedSourceKeysOnceWithTheirBehaviorForEveryLanguage() {
+-        allLayouts.forEach { layout ->
+-            val macLayout = build(layout)
+-            val sourceKeys = expectedSourceKeys(layout)
++    fun shiftRowHasNoIsoExtraKey() {
++        val row = layout.rows[4]
+ 
+-            sourceKeys.forEach { sourceKey ->
+-                assertEquals(
+-                    "${layout.javaClass.simpleName} key ${sourceKey.byte.toInt() and 0xFF}/${sourceKey.behavior}",
+-                    1,
+-                    macLayout.keys.count {
+-                        it.byte == sourceKey.byte && it.behavior == sourceKey.behavior
+-                    }
+-                )
+-            }
+-        }
++        assertEquals(KeyboardKey.KEY_SHIFT_LEFT.byte, row.keys.first().byte)
++        assertTrue(row.keys.none { it.byte == KeyboardKey.ROW_4_KEY_00.byte })
++        assertEquals(KeyboardKey.KEY_UP_ARROW.byte, row.keys[row.keys.size - 2].byte)
++        assertEquals(KeyboardKey.KEY_SHIFT_RIGHT.byte, row.keys.last().byte)
+     }
+ 
+     @Test
+-    fun placesSourceAndStructuralKeysExactlyOnceForEveryLanguage() {
+-        allLayouts.forEach { layout ->
+-            val macLayout = build(layout)
+-            val expected = (
+-                    expectedSourceKeys(layout)
+-                        .map { it.byte to it.behavior } +
+-                            structuralKeys.map { it.byte to it.behavior }
+-                    ).sortedWith(usageOrder)
+-            val actual = macLayout.keys.map { it.byte to it.behavior }.sortedWith(usageOrder)
+-
+-            assertEquals(layout.javaClass.simpleName, expected, actual)
+-        }
++    fun functionRowIsStrictUsAnsi() {
++        val row = layout.rows[0]
++
++        assertEquals(13, row.keys.size)
++        assertEquals(KeyboardKey.KEY_ESCAPE.byte, row.keys.first().byte)
++        assertEquals(MacKeyboardKeyWeight.ESCAPE, row.keys.first().weight, 0.001f)
++        assertTrue(row.keys.drop(1).all { it.weight == MacKeyboardKeyWeight.FUNCTION })
++        assertTrue(row.keys.none { it.byte == KeyboardKey.KEY_PRINT_SCREEN.byte })
++        assertTrue(row.keys.none { it.byte == KeyboardKey.KEY_DELETE_FORWARD.byte })
+     }
+ 
+     @Test
+-    fun keepsRowsInMacBookOrderForEnglishUs() {
+-        val rows = build(englishUs).rows
++    fun bottomRowMatchesTheMacModifierOrder() {
++        val row = layout.rows[5]
+ 
+-        assertEquals(
+-            listOf(
+-                KeyboardKey.KEY_ESCAPE.byte,
+-                KeyboardKey.KEY_F1.byte,
+-                KeyboardKey.KEY_F2.byte,
+-                KeyboardKey.KEY_F3.byte,
+-                KeyboardKey.KEY_F4.byte,
+-                KeyboardKey.KEY_F5.byte,
+-                KeyboardKey.KEY_F6.byte,
+-                KeyboardKey.KEY_F7.byte,
+-                KeyboardKey.KEY_F8.byte,
+-                KeyboardKey.KEY_F9.byte,
+-                KeyboardKey.KEY_F10.byte,
+-                KeyboardKey.KEY_F11.byte,
+-                KeyboardKey.KEY_F12.byte,
+-                KeyboardKey.KEY_PRINT_SCREEN.byte,
+-                KeyboardKey.KEY_DELETE_FORWARD.byte
+-            ),
+-            rows[0].keys.map { it.byte }
+-        )
+-        assertEquals(
+-            listOf(
+-                KeyboardKey.ROW_1_KEY_00.byte,
+-                KeyboardKey.ROW_1_KEY_01.byte,
+-                KeyboardKey.ROW_1_KEY_02.byte,
+-                KeyboardKey.ROW_1_KEY_03.byte,
+-                KeyboardKey.ROW_1_KEY_04.byte,
+-                KeyboardKey.ROW_1_KEY_05.byte,
+-                KeyboardKey.ROW_1_KEY_06.byte,
+-                KeyboardKey.ROW_1_KEY_07.byte,
+-                KeyboardKey.ROW_1_KEY_08.byte,
+-                KeyboardKey.ROW_1_KEY_09.byte,
+-                KeyboardKey.ROW_1_KEY_10.byte,
+-                KeyboardKey.ROW_1_KEY_11.byte,
+-                KeyboardKey.ROW_1_KEY_12.byte,
+-                KeyboardKey.KEY_DELETE.byte
+-            ),
+-            rows[1].keys.map { it.byte }
+-        )
+-        assertEquals(
+-            listOf(
+-                KeyboardKey.KEY_TAB.byte,
+-                KeyboardKey.ROW_2_KEY_00.byte,
+-                KeyboardKey.ROW_2_KEY_01.byte,
+-                KeyboardKey.ROW_2_KEY_02.byte,
+-                KeyboardKey.ROW_2_KEY_03.byte,
+-                KeyboardKey.ROW_2_KEY_04.byte,
+-                KeyboardKey.ROW_2_KEY_05.byte,
+-                KeyboardKey.ROW_2_KEY_06.byte,
+-                KeyboardKey.ROW_2_KEY_07.byte,
+-                KeyboardKey.ROW_2_KEY_08.byte,
+-                KeyboardKey.ROW_2_KEY_09.byte,
+-                KeyboardKey.ROW_2_KEY_10.byte,
+-                KeyboardKey.ROW_2_KEY_11.byte,
+-                KeyboardKey.ROW_3_KEY_11.byte
+-            ),
+-            rows[2].keys.map { it.byte }
+-        )
+-        assertEquals(
+-            listOf(
+-                KeyboardKey.KEY_CAPS_LOCK.byte,
+-                KeyboardKey.ROW_3_KEY_00.byte,
+-                KeyboardKey.ROW_3_KEY_01.byte,
+-                KeyboardKey.ROW_3_KEY_02.byte,
+-                KeyboardKey.ROW_3_KEY_03.byte,
+-                KeyboardKey.ROW_3_KEY_04.byte,
+-                KeyboardKey.ROW_3_KEY_05.byte,
+-                KeyboardKey.ROW_3_KEY_06.byte,
+-                KeyboardKey.ROW_3_KEY_07.byte,
+-                KeyboardKey.ROW_3_KEY_08.byte,
+-                KeyboardKey.ROW_3_KEY_09.byte,
+-                KeyboardKey.ROW_3_KEY_10.byte,
+-                KeyboardKey.KEY_ENTER.byte
+-            ),
+-            rows[3].keys.map { it.byte }
+-        )
+-        assertEquals(
+-            listOf(
+-                KeyboardKey.KEY_SHIFT_LEFT.byte,
+-                KeyboardKey.ROW_4_KEY_01.byte,
+-                KeyboardKey.ROW_4_KEY_02.byte,
+-                KeyboardKey.ROW_4_KEY_03.byte,
+-                KeyboardKey.ROW_4_KEY_04.byte,
+-                KeyboardKey.ROW_4_KEY_05.byte,
+-                KeyboardKey.ROW_4_KEY_06.byte,
+-                KeyboardKey.ROW_4_KEY_07.byte,
+-                KeyboardKey.ROW_4_KEY_08.byte,
+-                KeyboardKey.ROW_4_KEY_09.byte,
+-                KeyboardKey.ROW_4_KEY_10.byte,
+-                KeyboardKey.KEY_UP_ARROW.byte,
+-                KeyboardKey.KEY_SHIFT_RIGHT.byte
+-            ),
+-            rows[4].keys.map { it.byte }
+-        )
+         assertEquals(
+             listOf(
+                 KeyboardKey.KEY_CTRL_LEFT.byte,
+@@ -279,163 +83,20 @@ class MacKeyboardLayoutFactoryTest {
+                 KeyboardKey.KEY_SPACE_BAR.byte,
+                 KeyboardKey.KEY_META_RIGHT.byte,
+                 KeyboardKey.KEY_ALT_GR.byte,
+-                KeyboardKey.KEY_CTRL_RIGHT.byte,
+                 KeyboardKey.KEY_LEFT_ARROW.byte,
+                 KeyboardKey.KEY_DOWN_ARROW.byte,
+                 KeyboardKey.KEY_RIGHT_ARROW.byte
+             ),
+-            rows[5].keys.map { it.byte }
++            row.keys.map { it.byte }
+         )
+     }
+ 
+     @Test
+-    fun reportsExplicitRowWeights() {
+-        val rows = build(englishUs).rows
++    fun onlyAnsiUsagesRemain() {
++        val bytes = layout.keys.map { it.byte }.toSet()
+ 
+-        assertEquals(
+-            listOf(15f, 15f, 15f, 15f, 15f, 16.25f),
+-            rows.map { it.totalWeight }
+-        )
+-    }
+-
+-    @Test
+-    fun appliesStructuralWeightsToTheMovedKeys() {
+-        val rows = build(englishUs).rows
+-
+-        assertEquals(MacKeyboardKeyWeight.CAPS_LOCK, rows[3].keys.first().weight)
+-        assertEquals(MacKeyboardKeyWeight.ENTER, rows[3].keys.last().weight)
+-        assertEquals(MacKeyboardKeyWeight.SHIFT_LEFT, rows[4].keys.first().weight)
+-        assertEquals(MacKeyboardKeyWeight.SHIFT_RIGHT, rows[4].keys.last().weight)
+-        assertEquals(MacKeyboardKeyWeight.TAB, rows[2].keys.first().weight)
+-        assertEquals(MacKeyboardKeyWeight.ROW_BACKSLASH, rows[2].keys.last().weight)
+-        assertEquals(MacKeyboardKeyWeight.BACKSPACE, rows[1].keys.last().weight)
+-        assertEquals(MacKeyboardKeyWeight.SPACE, rows[5].keys[3].weight)
+-        assertTrue(rows[1].keys.drop(1).dropLast(1).all { it.weight == MacKeyboardKeyWeight.ORDINARY })
+-        assertTrue(rows[2].keys.drop(1).dropLast(1).all { it.weight == MacKeyboardKeyWeight.ORDINARY })
+-        assertTrue(rows[3].keys.drop(1).dropLast(1).all { it.weight == MacKeyboardKeyWeight.ORDINARY })
+-        assertTrue(rows[4].keys.drop(2).dropLast(2).all { it.weight == MacKeyboardKeyWeight.ORDINARY })
+-    }
+-
+-    @Test
+-    fun keepsCapsLockAndModifiersOnTheirMacBookRows() {
+-        allLayouts.forEach { layout ->
+-            val macLayout = build(layout)
+-            val capsLock = macLayout.rows[3].keys.first()
+-
+-            assertEquals(MacKeyboardKeyKind.CAPS_LOCK, capsLock.kind)
+-            assertEquals(AdvancedKeyBehavior.CAPS_LOCK, capsLock.behavior)
+-            assertEquals(KeyboardKey.KEY_CAPS_LOCK.byte, capsLock.byte)
+-
+-            val leftShift = macLayout.rows[4].keys.first()
+-            assertEquals(MacKeyboardKeyKind.MODIFIER, leftShift.kind)
+-            assertEquals(KeyboardKey.KEY_SHIFT_LEFT.byte, leftShift.byte)
+-
+-            val rightShift = macLayout.rows[4].keys.last()
+-            assertEquals(MacKeyboardKeyKind.MODIFIER, rightShift.kind)
+-            assertEquals(KeyboardKey.KEY_SHIFT_RIGHT.byte, rightShift.byte)
+-
+-            assertEquals(
+-                listOf(
+-                    KeyboardKey.KEY_CTRL_LEFT.byte,
+-                    KeyboardKey.KEY_ALT.byte,
+-                    KeyboardKey.KEY_META_LEFT.byte,
+-                    KeyboardKey.KEY_META_RIGHT.byte,
+-                    KeyboardKey.KEY_ALT_GR.byte,
+-                    KeyboardKey.KEY_CTRL_RIGHT.byte
+-                ),
+-                macLayout.rows[5].keys
+-                    .filter { it.kind == MacKeyboardKeyKind.MODIFIER }
+-                    .map { it.byte }
+-            )
+-        }
+-    }
+-
+-    @Test
+-    fun movesGraveAndAnsiBackslashOutOfTheLegacyRows() {
+-        allLayouts.forEach { layout ->
+-            val macLayout = build(layout)
+-
+-            assertEquals(KeyboardKey.ROW_1_KEY_00.byte, macLayout.rows[1].keys.first().byte)
+-            assertEquals(
+-                KeyboardKey.ROW_3_KEY_11.byte,
+-                macLayout.rows[2].keys.last().byte
+-            )
+-            assertTrue(macLayout.rows[3].keys.none { it.byte == KeyboardKey.ROW_3_KEY_11.byte })
+-            assertTrue(macLayout.rows.drop(1).all { row -> row.keys.none { it.byte == KeyboardKey.ROW_1_KEY_00.byte && row !== macLayout.rows[1] } })
+-        }
+-    }
+-
+-    @Test
+-    fun insertsTheIsoExtraKeyAfterLeftShift() {
+-        val macLayout = build(german)
+-        val isoKey = macLayout.rows[4].keys[1]
+-
+-        assertEquals(KeyboardKey.ROW_4_KEY_00.byte, isoKey.byte)
+-        assertEquals(MacKeyboardKeyKind.ISO_EXTRA, isoKey.kind)
+-        assertEquals(MacKeyboardKeyWeight.ORDINARY, isoKey.weight)
+-    }
+-
+-    @Test
+-    fun frenchAndGermanRetainTheIsoExtraKey() {
+-        listOf(french, german).forEach { layout ->
+-            assertEquals(
+-                layout.javaClass.simpleName,
+-                listOf(KeyboardKey.ROW_4_KEY_00.byte),
+-                build(layout)
+-                    .keys
+-                    .filter { it.kind == MacKeyboardKeyKind.ISO_EXTRA }
+-                    .map { it.byte }
+-            )
+-        }
+-    }
+-
+-    @Test
+-    fun englishUsUsesStrictAnsiWithoutTheLegacyIsoExtra() {
+-        val sourceIsoCount = sourceUsages(englishUs).count { it == KeyboardKey.ROW_4_KEY_00.byte }
+-        val macLayout = build(englishUs)
+-
+-        // US legacy data contains both ANSI backslash (ROW_3_KEY_11) and the ISO extra alias.
+-        // Only the latter is omitted from the strict ANSI presentation.
+-        assertEquals(1, sourceIsoCount)
+-        assertEquals(0, macLayout.keys.count { it.byte == KeyboardKey.ROW_4_KEY_00.byte })
+-        assertTrue(macLayout.keys.none { it.kind == MacKeyboardKeyKind.ISO_EXTRA })
+-        assertEquals(1, macLayout.keys.count { it.byte == KeyboardKey.ROW_3_KEY_11.byte })
+-    }
+-
+-    @Test
+-    fun everyNonUsLanguageKeepsEverySourceUsage() {
+-        allLayouts
+-            .filter { layoutLanguages.getValue(it) != KeyboardLanguage.ENGLISH_US }
+-            .forEach { layout ->
+-                val macLayout = build(layout)
+-                val builtUsages = macLayout.keys.map { it.byte }.toSet()
+-
+-                assertTrue(
+-                    layout.javaClass.simpleName,
+-                    builtUsages.containsAll(sourceUsages(layout))
+-                )
+-                assertEquals(
+-                    layout.javaClass.simpleName,
+-                    1,
+-                    macLayout.keys.count { it.kind == MacKeyboardKeyKind.ISO_EXTRA }
+-                )
+-            }
+-    }
+-
+-    @Test
+-    fun keepsEveryExpectedCharacterLegend() {
+-        allLayouts.forEach { layout ->
+-            val macLayout = build(layout)
+-            val sourceKeys = expectedSourceKeys(layout)
+-
+-            sourceKeys.forEach { sourceKey ->
+-                val builtKey = macLayout.keys.first { it.byte == sourceKey.byte }
+-                assertEquals(
+-                    "${layout.javaClass.simpleName} legend of ${sourceKey.byte.toInt() and 0xFF}",
+-                    sourceKey,
+-                    builtKey.key.withWeight(sourceKey.weight)
+-                )
+-            }
+-        }
++        assertTrue(KeyboardKey.ROW_4_KEY_00.byte !in bytes)
++        assertTrue(KeyboardKey.KEY_PRINT_SCREEN.byte !in bytes)
++        assertTrue(KeyboardKey.KEY_DELETE_FORWARD.byte !in bytes)
+     }
+ }
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt
+index cb4f958..0d07ad9 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt
+@@ -88,7 +88,7 @@ class MacKeyboardLayoutTest {
+     }
+ 
+     @Test
+-    fun functionRowIsEscF1ToF12PrintScreenAndDelete() {
++    fun functionRowIsEscAndF1ToF12() {
+         val row = MacKeyboardSpec.functionRow
+ 
+         assertEquals(
+@@ -105,18 +105,22 @@ class MacKeyboardLayoutTest {
+                 KeyboardKey.KEY_F9.byte,
+                 KeyboardKey.KEY_F10.byte,
+                 KeyboardKey.KEY_F11.byte,
+-                KeyboardKey.KEY_F12.byte,
+-                KeyboardKey.KEY_PRINT_SCREEN.byte,
+-                KeyboardKey.KEY_DELETE_FORWARD.byte
++                KeyboardKey.KEY_F12.byte
+             ),
+             row.keys.map { it.byte }
+         )
+-        assertEquals(15, row.keys.size)
++        assertEquals(13, row.keys.size)
+         assertEquals(15f, row.totalWeight, 0.001f)
+-        assertEquals(
+-            List(15) { 1f },
+-            row.keys.map { it.weight }
+-        )
++        assertEquals(1.5f, row.keys.first().weight, 0.001f)
++        assertTrue(row.keys.drop(1).all { it.weight == 1.125f })
++    }
++
++    @Test
++    fun functionRowHasNoPrintScreenOrForwardDelete() {
++        val row = MacKeyboardSpec.functionRow
++
++        assertTrue(row.keys.none { it.byte == KeyboardKey.KEY_PRINT_SCREEN.byte })
++        assertTrue(row.keys.none { it.byte == KeyboardKey.KEY_DELETE_FORWARD.byte })
+     }
+ 
+     @Test
+@@ -139,7 +143,6 @@ class MacKeyboardLayoutTest {
+                 KeyboardKey.KEY_SPACE_BAR.byte,
+                 KeyboardKey.KEY_META_RIGHT.byte,
+                 KeyboardKey.KEY_ALT_GR.byte,
+-                KeyboardKey.KEY_CTRL_RIGHT.byte,
+                 KeyboardKey.KEY_LEFT_ARROW.byte,
+                 KeyboardKey.KEY_DOWN_ARROW.byte,
+                 KeyboardKey.KEY_RIGHT_ARROW.byte
+@@ -147,28 +150,23 @@ class MacKeyboardLayoutTest {
+             row.keys.map { it.byte }
+         )
+         assertEquals(
+-            listOf(1.25f, 1.25f, 1.25f, 5f, 1.25f, 1.25f, 1.25f, 1f, 1f, 1.75f),
++            listOf(1.25f, 1.25f, 1.25f, 5f, 1.25f, 1.25f, 1f, 1f, 1.75f),
+             row.keys.map { it.weight }
+         )
++        assertEquals(15f, row.totalWeight, 0.001f)
+     }
+ 
+     @Test
+-    fun bottomRowKeepsEveryLegacyModifierUsage() {
++    fun bottomRowUsesTheMacModifierOrder() {
+         val row = MacKeyboardSpec.bottomRow
+-        val modifierBytes = row.keys
+-            .filter { it.kind == MacKeyboardKeyKind.MODIFIER }
+-            .map { it.behavior }
+ 
+-        assertTrue(modifierBytes.isNotEmpty())
+-        assertTrue(modifierBytes.all { it == AdvancedKeyBehavior.MODIFIER })
+         assertEquals(
+             listOf(
+                 KeyboardKey.KEY_CTRL_LEFT.byte,
+                 KeyboardKey.KEY_ALT.byte,
+                 KeyboardKey.KEY_META_LEFT.byte,
+                 KeyboardKey.KEY_META_RIGHT.byte,
+-                KeyboardKey.KEY_ALT_GR.byte,
+-                KeyboardKey.KEY_CTRL_RIGHT.byte
++                KeyboardKey.KEY_ALT_GR.byte
+             ),
+             row.keys.filter { it.kind == MacKeyboardKeyKind.MODIFIER }.map { it.byte }
+         )
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardPresentationPolicyTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardPresentationPolicyTest.kt
+deleted file mode 100644
+index 1de2ea6..0000000
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardPresentationPolicyTest.kt
++++ /dev/null
+@@ -1,100 +0,0 @@
+-package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
+-
+-import org.junit.Assert.assertEquals
+-import org.junit.Assert.assertFalse
+-import org.junit.Assert.assertTrue
+-import org.junit.Test
+-
+-class MacKeyboardPresentationPolicyTest {
+-
+-    @Test
+-    fun wideBreakpointMatchesTheAppleReference() {
+-        assertFalse(MacKeyboardPresentationPolicy.isWide(759f))
+-        assertTrue(MacKeyboardPresentationPolicy.isWide(760f))
+-        assertTrue(MacKeyboardPresentationPolicy.isWide(1024f))
+-    }
+-
+-    @Test
+-    fun compactPortraitKeepsHalfOfTheScreenHeight() {
+-        val height = MacKeyboardPresentationPolicy.maxKeyboardHeight(
+-            widthDp = 360f,
+-            availableHeightDp = 500f,
+-            screenHeightDp = 800f,
+-            isPortrait = true
+-        )
+-
+-        assertEquals(400f, height, 0.01f)
+-    }
+-
+-    @Test
+-    fun compactPortraitNeverExceedsTheAvailableHeight() {
+-        val height = MacKeyboardPresentationPolicy.maxKeyboardHeight(
+-            widthDp = 360f,
+-            availableHeightDp = 300f,
+-            screenHeightDp = 800f,
+-            isPortrait = true
+-        )
+-
+-        assertEquals(300f, height, 0.01f)
+-    }
+-
+-    @Test
+-    fun compactLandscapeUsesTheFullScreenHeight() {
+-        val height = MacKeyboardPresentationPolicy.maxKeyboardHeight(
+-            widthDp = 600f,
+-            availableHeightDp = 500f,
+-            screenHeightDp = 400f,
+-            isPortrait = false
+-        )
+-
+-        assertEquals(400f, height, 0.01f)
+-    }
+-
+-    @Test
+-    fun wideLayoutCapsHeightAgainstItsWidth() {
+-        val height = MacKeyboardPresentationPolicy.maxKeyboardHeight(
+-            widthDp = 1000f,
+-            availableHeightDp = 700f,
+-            screenHeightDp = 700f,
+-            isPortrait = false
+-        )
+-
+-        assertEquals(320f, height, 0.01f)
+-    }
+-
+-    @Test
+-    fun wideLayoutStillRespectsTheAvailableHeight() {
+-        val height = MacKeyboardPresentationPolicy.maxKeyboardHeight(
+-            widthDp = 1000f,
+-            availableHeightDp = 200f,
+-            screenHeightDp = 700f,
+-            isPortrait = false
+-        )
+-
+-        assertEquals(200f, height, 0.01f)
+-    }
+-
+-    @Test
+-    fun unboundedParentFallsBackToTheScreenHeight() {
+-        assertEquals(
+-            400f,
+-            MacKeyboardPresentationPolicy.maxKeyboardHeight(
+-                widthDp = 360f,
+-                availableHeightDp = null,
+-                screenHeightDp = 800f,
+-                isPortrait = true
+-            ),
+-            0.01f
+-        )
+-        assertEquals(
+-            400f,
+-            MacKeyboardPresentationPolicy.maxKeyboardHeight(
+-                widthDp = 600f,
+-                availableHeightDp = null,
+-                screenHeightDp = 400f,
+-                isPortrait = false
+-            ),
+-            0.01f
+-        )
+-    }
+-}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/ScrollStepTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/ScrollStepTest.kt
+new file mode 100644
+index 0000000..0acfba7
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/ScrollStepTest.kt
+@@ -0,0 +1,27 @@
++package com.atharok.btremote.domain.entities.remoteInput.trackpad
++
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++class ScrollStepTest {
++
++    @Test
++    fun theStepNeverCollapsesToZero() {
++        assertEquals(1, ScrollStep.amount(0f))
++        assertEquals(1, ScrollStep.amount(0.25f))
++        assertEquals(3, ScrollStep.amount(1f))
++        assertEquals(15, ScrollStep.amount(5f))
++    }
++
++    @Test
++    fun upIsPositiveAndDownIsNegative() {
++        assertEquals(3f, ScrollStep.wheel(1, 1f, invertScroll = false))
++        assertEquals(-3f, ScrollStep.wheel(-1, 1f, invertScroll = false))
++    }
++
++    @Test
++    fun invertedScrollingFlipsBothDirections() {
++        assertEquals(-3f, ScrollStep.wheel(1, 1f, invertScroll = true))
++        assertEquals(3f, ScrollStep.wheel(-1, 1f, invertScroll = true))
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizerTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizerTest.kt
+index 91c6f0b..a12ba13 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizerTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizerTest.kt
+@@ -245,10 +245,10 @@ class TrackpadGestureRecognizerTest {
+     @Test
+     fun threeAndFourFingerSwipesMapEveryDirection() {
+         val cases = listOf(
+-            SwipeCase(3, dx = 0f, dy = -60f, expected = TrackpadGestureAction.APP_SWITCHER),
+-            SwipeCase(3, dx = 0f, dy = 60f, expected = TrackpadGestureAction.HOME),
+-            SwipeCase(3, dx = -60f, dy = 0f, expected = TrackpadGestureAction.PREVIOUS_APP),
+-            SwipeCase(3, dx = 60f, dy = 0f, expected = TrackpadGestureAction.NEXT_APP),
++            SwipeCase(3, dx = 0f, dy = -60f, expected = TrackpadGestureAction.MISSION_CONTROL),
++            SwipeCase(3, dx = 0f, dy = 60f, expected = TrackpadGestureAction.APP_EXPOSE),
++            SwipeCase(3, dx = -60f, dy = 0f, expected = TrackpadGestureAction.SWITCH_SPACE_LEFT),
++            SwipeCase(3, dx = 60f, dy = 0f, expected = TrackpadGestureAction.SWITCH_SPACE_RIGHT),
+             SwipeCase(4, dx = 0f, dy = -60f, expected = TrackpadGestureAction.MISSION_CONTROL),
+             SwipeCase(4, dx = 0f, dy = 60f, expected = TrackpadGestureAction.APP_EXPOSE),
+             SwipeCase(4, dx = -60f, dy = 0f, expected = TrackpadGestureAction.SWITCH_SPACE_LEFT),
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadLongPressTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadLongPressTest.kt
+new file mode 100644
+index 0000000..d1f07a2
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadLongPressTest.kt
+@@ -0,0 +1,97 @@
++package com.atharok.btremote.domain.entities.remoteInput.trackpad
++
++import com.atharok.btremote.domain.entities.settings.TrackpadSettings
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class TrackpadLongPressTest {
++
++    @Test
++    fun longPressStartsADragAndTheLiftEndsItOnce() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(touch(0, pointer(0, 10f, 10f)))
++
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.DRAG_START),
++                TrackpadGestureOutput.DragStart
++            ),
++            recognizer.onLongPressTimeout()
++        )
++        assertEquals(
++            listOf(TrackpadGestureOutput.Move(5f, 0f, dragging = true)),
++            recognizer.onTouch(touch(400, pointer(0, 15f, 10f)))
++        )
++        assertEquals(
++            listOf(TrackpadGestureOutput.DragEnd),
++            recognizer.onTouch(touch(500))
++        )
++    }
++
++    @Test
++    fun aSecondFingerBeforeTheTimeoutCancelsThePress() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(touch(0, pointer(0, 10f, 10f)))
++        recognizer.onTouch(touch(100, pointer(0, 10f, 10f), pointer(1, 40f, 10f)))
++
++        assertTrue(recognizer.onLongPressTimeout().isEmpty())
++    }
++
++    @Test
++    fun movementPastTheAllowanceCancelsThePress() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        recognizer.onTouch(touch(0, pointer(0, 10f, 10f)))
++        recognizer.onTouch(touch(100, pointer(0, 19f, 10f)))
++
++        assertTrue(recognizer.onLongPressTimeout().isEmpty())
++    }
++
++    @Test
++    fun theSettingCanTurnLongPressOff() {
++        val recognizer = TrackpadGestureRecognizer(
++            settings = TrackpadSettings(longPressDragEnabled = false)
++        )
++
++        recognizer.onTouch(touch(0, pointer(0, 10f, 10f)))
++
++        assertTrue(recognizer.onLongPressTimeout().isEmpty())
++    }
++
++    @Test
++    fun aLongPressDragDoesNotAlsoClickOnLift() {
++        val recognizer = TrackpadGestureRecognizer()
++        recognizer.onTouch(touch(0, pointer(0, 10f, 10f)))
++        recognizer.onLongPressTimeout()
++
++        val outputs = recognizer.onTouch(touch(400))
++
++        assertEquals(listOf(TrackpadGestureOutput.DragEnd), outputs)
++        assertTrue(outputs.none { it is TrackpadGestureOutput.Click })
++    }
++
++    @Test
++    fun fiveFingersAreNotRecognized() {
++        val recognizer = TrackpadGestureRecognizer()
++
++        assertTrue(recognizer.onTouch(multiFingerTouch(0, fingerCount = 5)).isEmpty())
++        assertTrue(recognizer.onTouch(touch(100)).isEmpty())
++    }
++
++    private fun multiFingerTouch(time: Long, fingerCount: Int): TrackpadTouch =
++        touch(
++            time,
++            *List(fingerCount) { index ->
++                pointer(index.toLong(), 50f + index * 20f, 50f)
++            }.toTypedArray()
++        )
++
++    private fun touch(time: Long, vararg pointers: TrackpadPointer): TrackpadTouch =
++        TrackpadTouch(pointers.toList(), time)
++
++    private fun pointer(id: Long, x: Float, y: Float): TrackpadPointer =
++        TrackpadPointer(id, x, y)
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/settings/InputPageTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/settings/InputPageTest.kt
+new file mode 100644
+index 0000000..98fd3cc
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/settings/InputPageTest.kt
+@@ -0,0 +1,24 @@
++package com.atharok.btremote.domain.entities.settings
++
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++class InputPageTest {
++
++    @Test
++    fun missingOrUnknownValuesOpenTheKeyboard() {
++        assertEquals(InputPage.KEYBOARD, InputPage.fromPersistedValue(null))
++        assertEquals(InputPage.KEYBOARD, InputPage.fromPersistedValue("future-page"))
++    }
++
++    @Test
++    fun storedValuesResolve() {
++        assertEquals(InputPage.KEYBOARD, InputPage.fromPersistedValue("keyboard"))
++        assertEquals(InputPage.TRACKPAD, InputPage.fromPersistedValue("trackpad"))
++    }
++
++    @Test
++    fun theDefaultSettingsOpenTheKeyboard() {
++        assertEquals(InputPage.KEYBOARD, RemoteSettings().inputPage)
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/settings/TrackpadSettingsTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/settings/TrackpadSettingsTest.kt
+index 68b5665..c691421 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/settings/TrackpadSettingsTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/settings/TrackpadSettingsTest.kt
+@@ -12,18 +12,19 @@ class TrackpadSettingsTest {
+         val settings = TrackpadSettings()
+ 
+         assertTrue(settings.doubleTapDragEnabled)
++        assertTrue(settings.longPressDragEnabled)
+         assertEquals(TrackpadGestureAction.ZOOM, settings.pinchAction)
+         assertEquals(TrackpadGestureAction.NONE, settings.rotationAction)
+-        assertEquals(TrackpadGestureAction.APP_SWITCHER, settings.threeFingerSwipeUp)
+-        assertEquals(TrackpadGestureAction.HOME, settings.threeFingerSwipeDown)
+-        assertEquals(TrackpadGestureAction.PREVIOUS_APP, settings.threeFingerSwipeLeft)
+-        assertEquals(TrackpadGestureAction.NEXT_APP, settings.threeFingerSwipeRight)
+-        assertEquals(TrackpadGestureAction.SPOTLIGHT, settings.threeFingerTap)
++        assertEquals(TrackpadGestureAction.MISSION_CONTROL, settings.threeFingerSwipeUp)
++        assertEquals(TrackpadGestureAction.APP_EXPOSE, settings.threeFingerSwipeDown)
++        assertEquals(TrackpadGestureAction.SWITCH_SPACE_LEFT, settings.threeFingerSwipeLeft)
++        assertEquals(TrackpadGestureAction.SWITCH_SPACE_RIGHT, settings.threeFingerSwipeRight)
++        assertEquals(TrackpadGestureAction.NONE, settings.threeFingerTap)
+         assertEquals(TrackpadGestureAction.MISSION_CONTROL, settings.fourFingerSwipeUp)
+         assertEquals(TrackpadGestureAction.APP_EXPOSE, settings.fourFingerSwipeDown)
+         assertEquals(TrackpadGestureAction.SWITCH_SPACE_LEFT, settings.fourFingerSwipeLeft)
+         assertEquals(TrackpadGestureAction.SWITCH_SPACE_RIGHT, settings.fourFingerSwipeRight)
+-        assertEquals(TrackpadGestureAction.CONTROL_CENTER, settings.fourFingerTap)
++        assertEquals(TrackpadGestureAction.NONE, settings.fourFingerTap)
+     }
+ 
+     @Test
+@@ -32,6 +33,7 @@ class TrackpadSettingsTest {
+             TrackpadSettings(),
+             TrackpadSettings.fromPreferences(
+                 doubleTapDragEnabled = null,
++                longPressDragEnabled = null,
+                 pinchAction = null,
+                 rotationAction = null,
+                 threeFingerSwipeUp = null,
+@@ -52,6 +54,7 @@ class TrackpadSettingsTest {
+     fun knownStoredValuesOverrideDefaults() {
+         val settings = TrackpadSettings.fromPreferences(
+             doubleTapDragEnabled = false,
++            longPressDragEnabled = false,
+             pinchAction = TrackpadGestureAction.NONE.persistedValue,
+             rotationAction = TrackpadGestureAction.ROTATE_LEFT.persistedValue,
+             threeFingerSwipeUp = TrackpadGestureAction.DOCK.persistedValue,
+@@ -67,6 +70,7 @@ class TrackpadSettingsTest {
+         )
+ 
+         assertEquals(false, settings.doubleTapDragEnabled)
++        assertEquals(false, settings.longPressDragEnabled)
+         assertEquals(TrackpadGestureAction.NONE, settings.pinchAction)
+         assertEquals(TrackpadGestureAction.ROTATE_LEFT, settings.rotationAction)
+         assertEquals(TrackpadGestureAction.DOCK, settings.threeFingerSwipeUp)
+@@ -85,6 +89,7 @@ class TrackpadSettingsTest {
+     fun unknownStoredEnumsFallBackToNoAction() {
+         val settings = TrackpadSettings.fromPreferences(
+             doubleTapDragEnabled = null,
++            longPressDragEnabled = null,
+             pinchAction = "future_pinch",
+             rotationAction = "future_rotation",
+             threeFingerSwipeUp = "future_three_up",
+diff --git a/app/src/test/java/com/atharok/btremote/domain/haptics/HapticPolicyTest.kt b/app/src/test/java/com/atharok/btremote/domain/haptics/HapticPolicyTest.kt
+index 0349ae1..4d8436d 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/haptics/HapticPolicyTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/haptics/HapticPolicyTest.kt
+@@ -12,12 +12,12 @@ class HapticPolicyTest {
+     private val allEnabled = HapticSettings()
+ 
+     @Test
+-    fun defaultsEnableEveryGroupAtStrongIntensity() {
++    fun defaultsEnableEveryGroupAtMediumIntensity() {
+         assertTrue(allEnabled.enabled)
+         assertTrue(allEnabled.trackpad)
+         assertTrue(allEnabled.scroll)
+         assertTrue(allEnabled.keyboard)
+-        assertEquals(HapticIntensity.STRONG, allEnabled.intensity)
++        assertEquals(HapticIntensity.MEDIUM, allEnabled.intensity)
+     }
+ 
+     @Test
+@@ -62,7 +62,7 @@ class HapticPolicyTest {
+     }
+ 
+     @Test
+-    fun missingPreferencesKeepAllGroupsEnabledAtStrongIntensity() {
++    fun missingPreferencesKeepAllGroupsEnabledAtMediumIntensity() {
+         assertEquals(
+             HapticSettings(),
+             HapticSettings.fromPreferences(
+@@ -76,7 +76,7 @@ class HapticPolicyTest {
+     }
+ 
+     @Test
+-    fun unknownStoredIntensityFallsBackToStrong() {
++    fun unknownStoredIntensityFallsBackToMedium() {
+         val settings = HapticSettings.fromPreferences(
+             enabled = null,
+             trackpad = null,
+@@ -85,7 +85,7 @@ class HapticPolicyTest {
+             intensity = "future_intensity"
+         )
+ 
+-        assertEquals(HapticIntensity.STRONG, settings.intensity)
++        assertEquals(HapticIntensity.MEDIUM, settings.intensity)
+     }
+ 
+     @Test
+diff --git a/app/src/test/java/com/atharok/btremote/presentation/haptics/AndroidHapticFeedbackControllerTest.kt b/app/src/test/java/com/atharok/btremote/presentation/haptics/AndroidHapticFeedbackControllerTest.kt
+index a7936e5..39ba5cd 100644
+--- a/app/src/test/java/com/atharok/btremote/presentation/haptics/AndroidHapticFeedbackControllerTest.kt
++++ b/app/src/test/java/com/atharok/btremote/presentation/haptics/AndroidHapticFeedbackControllerTest.kt
+@@ -27,11 +27,11 @@ class AndroidHapticFeedbackControllerTest {
+     }
+ 
+     @Test
+-    fun enabledTapUsesStrongAmplitudeAndShortDuration() {
++    fun enabledTapUsesMediumAmplitudeAndShortDuration() {
+         controller.tap(HapticSettings(), HapticSource.TRACKPAD)
+ 
+         assertEquals(
+-            listOf(VibrationEvent(durationMillis = 20, amplitude = 255)),
++            listOf(VibrationEvent(durationMillis = 20, amplitude = 128)),
+             sink.events
+         )
+     }
+@@ -48,7 +48,7 @@ class AndroidHapticFeedbackControllerTest {
+         )
+ 
+         assertEquals(1, sink.events.size)
+-        assertEquals(255, sink.events.single().amplitude)
++        assertEquals(128, sink.events.single().amplitude)
+     }
+ 
+     @Test
+@@ -62,8 +62,8 @@ class AndroidHapticFeedbackControllerTest {
+ 
+         assertEquals(
+             listOf(
+-                VibrationEvent(durationMillis = 10, amplitude = 255),
+-                VibrationEvent(durationMillis = 10, amplitude = 255)
++                VibrationEvent(durationMillis = 10, amplitude = 128),
++                VibrationEvent(durationMillis = 10, amplitude = 128)
+             ),
+             sink.events
+         )
