@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 22:14:20 +0800
+Subject: [PATCH] =?UTF-8?q?fix(keyboard):=20Caps=20=E5=88=87=E6=8D=A2?=
+ =?UTF-8?q?=E4=B8=8D=E5=86=8D=E4=B8=A2=E5=BC=83=E5=B7=B2=E6=8C=89=E9=94=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Caps 点按报告折叠当前按住键，随后恢复按住态而非清零
+- 增加按住字母时切换 Caps 的报告顺序测试
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportState.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportState.kt
+index 59dfe37..92a0b16 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportState.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportState.kt
+@@ -61,8 +61,11 @@ class KeyboardReportState {
+     fun toggleCapsLock(): List<ByteArray> {
+         isCapsLockOn = !isCapsLockOn
+         return listOf(
++            // Fold held keys into the Caps tap, then restore the held-key report
++            // instead of clearing them: toggling Caps must not drop a key the user
++            // is still holding.
+             report(extraKeys = listOf(KeyboardKey.KEY_CAPS_LOCK.byte)),
+-            ByteArray(REPORT_SIZE)
++            report()
+         )
+     }
+ 
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt
+index 2da675b..0ae2886 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt
+@@ -101,6 +101,41 @@ class KeyboardReportStateTest {
+         assertTrue(state.isCapsLockOn)
+     }
+ 
++    @Test
++    fun togglingCapsWhileAKeyIsHeldKeepsTheKeyDown() {
++        val state = KeyboardReportState()
++        state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
++
++        val reports = state.toggleCapsLock()
++
++        assertArrayEquals(
++            byteArrayOf(
++                KeyboardKey.KEY_SHIFT_LEFT.byte,
++                0,
++                KeyboardKey.ROW_3_KEY_00.byte,
++                KeyboardKey.KEY_CAPS_LOCK.byte,
++                0,
++                0,
++                0,
++                0
++            ),
++            reports[0]
++        )
++        assertArrayEquals(
++            byteArrayOf(
++                KeyboardKey.KEY_SHIFT_LEFT.byte,
++                0,
++                KeyboardKey.ROW_3_KEY_00.byte,
++                0,
++                0,
++                0,
++                0,
++                0
++            ),
++            reports[1]
++        )
++    }
++
+     @Test
+     fun twoFingersOnTheSameKeyReleaseOnlyWhenTheLastFingerLeaves() {
+         val state = KeyboardReportState()
