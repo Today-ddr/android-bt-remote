@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "v*.*.*"
+        description: "版本号，可带或不带 v 前缀，如 0.1.1 / v0.1.1"
         required: true
         type: string
 
@@ -27,15 +27,48 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Set TAG
+      - name: Set VERSION (push)
         if: github.event_name == 'push'
+        shell: bash
         run: |
-          echo "version=$(echo '${{ github.ref_name }}' | awk -F 'v' '{print $2}')" >> $GITHUB_ENV
+          set -euo pipefail
+          case "${GITHUB_REF}" in
+            refs/tags/*)
+              version="${GITHUB_REF_NAME#v}"
+              ;;
+            refs/heads/release/*)
+              version="${GITHUB_REF_NAME#release/}"
+              version="${version#v}"
+              ;;
+            refs/heads/main)
+              version="dev-${GITHUB_SHA:0:7}"
+              ;;
+            *)
+              echo "::error::unsupported ref: ${GITHUB_REF}"
+              exit 1
+              ;;
+          esac
+          if [ -z "${version}" ]; then
+            echo "::error::cannot derive version from ${GITHUB_REF}"
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_ENV}"
 
-      - name: Set TAG
+      - name: Set VERSION (workflow_dispatch)
         if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          echo "version=$(echo '${{ inputs.version }}' | awk -F 'v' '{print $2}')" >> $GITHUB_ENV
+          set -euo pipefail
+          version="$(printf '%s' "${INPUT_VERSION}" | tr -d '[:space:]')"
+          version="${version#v}"
+          version="${version#V}"
+          if [ -z "${version}" ]; then
+            echo "::error::version input must not be empty"
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_ENV}"
 
       - name: Use JDK
         uses: actions/setup-java@v4
@@ -64,6 +97,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish (GitHub)
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/release/')
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
