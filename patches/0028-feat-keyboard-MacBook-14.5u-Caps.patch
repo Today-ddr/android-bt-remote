@@ -1,0 +1,2007 @@
+From 4097e750cf6110d5dab75e1a9722fe9cf6ca1598 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 01:10:35 +0800
+Subject: [PATCH 28/33] =?UTF-8?q?feat(keyboard):=20=E5=AF=B9=E9=BD=90=20Ma?=
+ =?UTF-8?q?cBook=2014.5u=20=E9=94=AE=E7=9B=98=E4=B8=8E=E5=AE=BF=E4=B8=BB?=
+ =?UTF-8?q?=20Caps?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 六行统一 14.5u 网格，键位权重对齐 iOS 最终版并去掉旧 15u 比例
+- 横向 gap 计入每个键槽，Up/Down 共用 1u 列且各自半高可独立触控
+- HID 报告 ID 改为鼠标 1、键盘 2、LED 3，删除 Consumer 遥控集合
+- 读取宿主 LED 输出并经仓库暴露 StateFlow，Caps 只发 tap 不再伪造 Shift
+- 实现 onGetReport 最小回复，断线与停止 HID 时清空 LED 状态
+---
+ .../btremote/common/utils/Constants.kt        | 145 ++++-----
+ .../data/bluetooth/BluetoothHidCore.kt        |  93 +++++-
+ .../repositories/BluetoothRepositoryImpl.kt   |   5 +
+ .../remoteInput/keyboard/KeyboardLedState.kt  |  68 +++++
+ .../keyboard/KeyboardReportState.kt           |  50 ++-
+ .../keyboard/mac/KeyboardGridMetrics.kt       |  47 +++
+ .../keyboard/mac/MacKeyboardLayout.kt         |  87 ++++--
+ .../keyboard/mac/MacKeyboardLayoutFactory.kt  |   3 +-
+ .../repositories/BluetoothRepository.kt       |   3 +
+ .../btremote/domain/usecases/RemoteUseCase.kt |   4 +
+ .../presentation/viewmodel/RemoteViewModel.kt |   5 +
+ .../ui/views/keyboard/AdvancedKeyboard.kt     | 286 ++++++++++++++++--
+ .../common/utils/HidReportDescriptorTest.kt   |  59 ++++
+ .../keyboard/KeyboardLedStateTest.kt          |  72 +++++
+ .../keyboard/KeyboardReportStateTest.kt       | 119 ++++----
+ .../keyboard/mac/KeyboardGridMetricsTest.kt   |  89 ++++++
+ .../mac/MacKeyboardLayoutFactoryTest.kt       |  61 +++-
+ .../keyboard/mac/MacKeyboardLayoutTest.kt     | 109 ++++---
+ 18 files changed, 1041 insertions(+), 264 deletions(-)
+ create mode 100644 app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardLedState.kt
+ create mode 100644 app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/KeyboardGridMetrics.kt
+ create mode 100644 app/src/test/java/com/atharok/btremote/common/utils/HidReportDescriptorTest.kt
+ create mode 100644 app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardLedStateTest.kt
+ create mode 100644 app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/KeyboardGridMetricsTest.kt
+
+diff --git a/app/src/main/java/com/atharok/btremote/common/utils/Constants.kt b/app/src/main/java/com/atharok/btremote/common/utils/Constants.kt
+index 074ed88..5da9e1d 100644
+--- a/app/src/main/java/com/atharok/btremote/common/utils/Constants.kt
++++ b/app/src/main/java/com/atharok/btremote/common/utils/Constants.kt
+@@ -26,77 +26,84 @@ const val DEFAULT_SHOULD_INVERT_MOUSE_SCROLLING_DIRECTION: Boolean = false
+ 
+ // ---- HID Descriptor ----
+ 
+-const val KEYBOARD_REPORT_ID = 0x01
+-const val MOUSE_REPORT_ID = 0x02
+-const val REMOTE_REPORT_ID = 0x03
++// Report IDs shared with the iOS build: mouse input, keyboard input, and the
++// keyboard LED output the host writes back.
++const val MOUSE_REPORT_ID = 0x01
++const val KEYBOARD_REPORT_ID = 0x02
++const val KEYBOARD_LED_REPORT_ID = 0x03
+ 
+ val REMOTE_INPUT_NONE = byteArrayOf(0x00, 0x00)
+ 
+-val bluetoothHidDescriptor = byteArrayOf(
+-    // Remote Control
+-    0x05.toByte(), 0x0C.toByte(),                    // Usage Page (Consumer Devices)
+-    0x09.toByte(), 0x01.toByte(),                    // Usage (Consumer Control)
+-    0xA1.toByte(), 0x01.toByte(),                    // Collection (Application)
+-    0x85.toByte(), REMOTE_REPORT_ID.toByte(),        //   Report ID (2)
+-    0x19.toByte(), 0x00.toByte(),                    //   Usage Minimum (Unassigned)
+-    0x2A.toByte(), 0xFF.toByte(), 0x03.toByte(),     //   Usage Maximum (1023)
+-    0x75.toByte(), 0x10.toByte(),                    //   Report Size (16)
+-    0x95.toByte(), 0x01.toByte(),                    //   Report Count (1)
+-    0x15.toByte(), 0x00.toByte(),                    //   Logical Minimum (0)
+-    0x26.toByte(), 0xFF.toByte(), 0x03.toByte(),     //   Logical Maximum (1023)
+-    0x81.toByte(), 0x00.toByte(),                    //   Input (Data,Array,Absolute)
+-    0xC0.toByte(),                                   // End Collection
++/**
++ * 113-byte HID report map: keyboard input + LED output (61 bytes) and mouse (52 bytes).
++ *
++ * Only reports that are actually produced are declared here. The keyboard page
++ * sends keys and modifiers, the trackpad sends relative pointer movement, and
++ * the LED output is what the host writes back; there is no consumer/remote
++ * collection any more, matching the iOS final profile.
++ */
++val bluetoothHidDescriptor: ByteArray = reportMap(
++    // Keyboard input (Report ID 2) + LED output (Report ID 3)
++    0x05, 0x01, // Usage Page (Generic Desktop)
++    0x09, 0x06, // Usage (Keyboard)
++    0xA1, 0x01, // Collection (Application)
++    0x85, KEYBOARD_REPORT_ID, //   Report ID (2)
++    0x05, 0x07, //   Usage Page (Keyboard/Keypad)
++    0x19, 0xE0, //   Usage Min (LeftControl)
++    0x29, 0xE7, //   Usage Max (RightGUI)
++    0x75, 0x01, //   Report Size (1)
++    0x95, 0x08, //   Report Count (8)
++    0x15, 0x00, //   Logical Min (0)
++    0x25, 0x01, //   Logical Max (1)
++    0x81, 0x02, //   Input (Data,Var,Abs): 8 modifier bits
++    0x95, 0x01, //   Report Count (1)
++    0x75, 0x08, //   Report Size (8)
++    0x81, 0x01, //   Input (Const,Array,Abs): reserved byte
++    0x19, 0x00, //   Usage Min (0)
++    0x29, 0xDD, //   Usage Max (221)
++    0x95, 0x06, //   Report Count (6)
++    0x25, 0xDD, //   Logical Max (221)
++    0x81, 0x00, //   Input (Data,Array,Abs): 6 keys
++    0x85, KEYBOARD_LED_REPORT_ID, //   Report ID (3)
++    0x05, 0x08, //   Usage Page (LEDs)
++    0x19, 0x01, //   Usage Min (NumLock)
++    0x29, 0x05, //   Usage Max (Kana)
++    0x95, 0x05, //   Report Count (5)
++    0x75, 0x01, //   Report Size (1)
++    0x25, 0x01, //   Logical Max (1)
++    0x91, 0x02, //   Output (Data,Var,Abs): 5 LED bits
++    0x95, 0x03, //   Report Count (3)
++    0x91, 0x03, //   Output (Const,Var,Abs): LED padding
++    0xC0, // End Collection
+ 
+-    // Keyboard
+-    0x05.toByte(), 0x01.toByte(),                    // Usage Page (Generic Desktop)
+-    0x09.toByte(), 0x06.toByte(),                    // Usage (Keyboard)
+-    0xA1.toByte(), 0x01.toByte(),                    // Collection (Application)
+-    0x85.toByte(), KEYBOARD_REPORT_ID.toByte(),      //   Report ID (1)
+-    0x05.toByte(), 0x07.toByte(),                    //   Usage Page (Keyboard Key Codes)
+-    0x19.toByte(), 0xE0.toByte(),                    //   Usage Minimum (224)
+-    0x29.toByte(), 0xE7.toByte(),                    //   Usage Maximum (231)
+-    0x15.toByte(), 0x00.toByte(),                    //   Logical Minimum (0)
+-    0x25.toByte(), 0x01.toByte(),                    //   Logical Maximum (1)
+-    0x75.toByte(), 0x01.toByte(),                    //   Report Size (1)
+-    0x95.toByte(), 0x08.toByte(),                    //   Report Count (8)
+-    0x81.toByte(), 0x02.toByte(),                    //   Input (Data,Variable,Absolute)
+-    0x75.toByte(), 0x08.toByte(),                    //    Report Size (8)
+-    0x95.toByte(), 0x01.toByte(),                    //    Report Count (1)
+-    0x15.toByte(), 0x00.toByte(),                    //    Logical Minimum (0)
+-    0x26.toByte(), 0xFF.toByte(), 0x00.toByte(),     //    Logical Maximum (255)
+-    0x05.toByte(), 0x07.toByte(),                    //    Usage Page (Keyboard Key Codes)
+-    0x19.toByte(), 0x00.toByte(),                    //    Usage Minimum (0)
+-    0x29.toByte(), 0xFF.toByte(),                    //    Usage Maximum (255)
+-    0x81.toByte(), 0x00.toByte(),                    //    Input (Data,Array,Absolute)
+-    0xC0.toByte(),                                   // End Collection
++    // Mouse (Report ID 1)
++    0x05, 0x01, // Usage Page (Generic Desktop)
++    0x09, 0x02, // Usage (Mouse)
++    0xA1, 0x01, // Collection (Application)
++    0x85, MOUSE_REPORT_ID, //   Report ID (1)
++    0x09, 0x01, //   Usage (Pointer)
++    0xA1, 0x00, //   Collection (Physical)
++    0x05, 0x09, //     Usage Page (Button)
++    0x19, 0x01, //     Usage Min (1)
++    0x29, 0x03, //     Usage Max (3)
++    0x75, 0x01, //     Report Size (1)
++    0x95, 0x03, //     Report Count (3)
++    0x15, 0x00, //     Logical Min (0)
++    0x25, 0x01, //     Logical Max (1)
++    0x81, 0x02, //     Input (Data,Var,Abs)
++    0x95, 0x05, //     Report Count (5)
++    0x81, 0x03, //     Input (Const,Var,Abs) padding
++    0x05, 0x01, //     Usage Page (Generic Desktop)
++    0x09, 0x30, //     Usage (X)
++    0x09, 0x31, //     Usage (Y)
++    0x09, 0x38, //     Usage (Wheel)
++    0x75, 0x08, //     Report Size (8)
++    0x95, 0x03, //     Report Count (3)
++    0x15, 0x81, //     Logical Min (-127)
++    0x25, 0x7F, //     Logical Max (127)
++    0x81, 0x06, //     Input (Data,Var,Rel)
++    0xC0, //   End Collection
++    0xC0 // End Collection
++)
+ 
+-    // Mouse
+-    0x05.toByte(), 0x01.toByte(),                    // Usage Page (Generic Desktop)
+-    0x09.toByte(), 0x02.toByte(),                    // Usage (Mouse)
+-    0xA1.toByte(), 0x01.toByte(),                    // Collection (Application)
+-    0x85.toByte(), MOUSE_REPORT_ID.toByte(),         //   Report ID (3)
+-    0x09.toByte(), 0x01.toByte(),                    //   Usage (Pointer)
+-    0xA1.toByte(), 0x00.toByte(),                    //   Collection (Physical)
+-    0x05.toByte(), 0x09.toByte(),                    //     Usage Page (Button)
+-    0x19.toByte(), 0x01.toByte(),                    //     Usage Minimum (1)
+-    0x29.toByte(), 0x03.toByte(),                    //     Usage Maximum (3)
+-    0x15.toByte(), 0x00.toByte(),                    //     Logical Minimum (0)
+-    0x25.toByte(), 0x01.toByte(),                    //     Logical Maximum (1)
+-    0x75.toByte(), 0x01.toByte(),                    //     Report Size (1)
+-    0x95.toByte(), 0x03.toByte(),                    //     Report Count (3)
+-    0x81.toByte(), 0x02.toByte(),                    //     Input (Data,Variable,Absolute)
+-    0x75.toByte(), 0x05.toByte(),                    //     Report Size (5)
+-    0x95.toByte(), 0x01.toByte(),                    //     Report Count (1)
+-    0x81.toByte(), 0x01.toByte(),                    //     Input (Constant,Array,Absolute)
+-    0x05.toByte(), 0x01.toByte(),                    //     Usage Page (Generic Desktop)
+-    0x09.toByte(), 0x30.toByte(),                    //     Usage (X)
+-    0x09.toByte(), 0x31.toByte(),                    //     Usage (Y)
+-    0x09.toByte(), 0x38.toByte(),                    //     Usage (Wheel)
+-    0x15.toByte(), 0x81.toByte(),                    //     Logical Minimum (-127)
+-    0x25.toByte(), 0x7F.toByte(),                    //     Logical Maximum (127)
+-    0x75.toByte(), 0x08.toByte(),                    //     Report Size (8)
+-    0x95.toByte(), 0x03.toByte(),                    //     Report Count (3)
+-    0x81.toByte(), 0x06.toByte(),                    //     Input (Data,Variable,Relative)
+-    0xC0.toByte(),                                   //   End Collection
+-    0xC0.toByte()                                    // End Collection
+-)
+\ No newline at end of file
++private fun reportMap(vararg bytes: Int): ByteArray = ByteArray(bytes.size) { bytes[it].toByte() }
+\ No newline at end of file
+diff --git a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+index 124e43a..8865824 100644
+--- a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
++++ b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+@@ -1,5 +1,6 @@
+ package com.atharok.btremote.data.bluetooth
+ 
++import android.Manifest
+ import android.bluetooth.BluetoothAdapter
+ import android.bluetooth.BluetoothDevice
+ import android.bluetooth.BluetoothHidDevice
+@@ -8,12 +9,13 @@ import android.bluetooth.BluetoothProfile
+ import android.bluetooth.BluetoothProfile.ServiceListener
+ import android.content.Context
+ import androidx.annotation.RequiresPermission
++import com.atharok.btremote.common.utils.KEYBOARD_LED_REPORT_ID
+ import com.atharok.btremote.common.utils.KEYBOARD_REPORT_ID
+-import com.atharok.btremote.common.utils.REMOTE_INPUT_NONE
++import com.atharok.btremote.common.utils.MOUSE_REPORT_ID
+ import com.atharok.btremote.common.utils.checkBluetoothConnectPermission
+ import com.atharok.btremote.common.utils.isMacAddress
+ import com.atharok.btremote.domain.entities.DeviceHidConnectionState
+-import com.atharok.btremote.domain.entities.remoteInput.RemoteButtonProperties
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLedState
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.StateFlow
+@@ -87,6 +89,7 @@ class BluetoothHidCore(
+         _deviceHidConnectionState.value = DeviceHidConnectionState()
+         _isBluetoothHidProfileRegistered.value = false
+         _isBluetoothServiceRunning.value = false
++        clearReportCache()
+     }
+ 
+     // ---- BluetoothProfile.ServiceListener implementation ----
+@@ -133,10 +136,72 @@ class BluetoothHidCore(
+ 
+         override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
+             super.onConnectionStateChanged(device, state)
++            if (state != BluetoothProfile.STATE_CONNECTED) {
++                // The host's LEDs are gone with the link; keeping the last state
++                // would leave the Caps dot lit for a keyboard that is not there.
++                _keyboardLedState.value = KeyboardLedState.EMPTY
++                lastKeyboardReport = ByteArray(KEYBOARD_REPORT_SIZE)
++                lastMouseReport = ByteArray(MOUSE_REPORT_SIZE)
++            }
+             if (checkBluetoothConnectPermission(context)) {
+                 _deviceHidConnectionState.value = DeviceHidConnectionState(state, device?.name ?: "")
+             }
+         }
++
++        /**
++         * The host writes the keyboard LED output report here. Only the LED
++         * report carries state this app uses; Caps Lock is drawn from it instead
++         * of being latched on the phone.
++         */
++        override fun onSetReport(device: BluetoothDevice?, type: Byte, id: Byte, data: ByteArray?) {
++            super.onSetReport(device, type, id, data)
++            if (type != BluetoothHidDevice.REPORT_TYPE_OUTPUT || data == null) return
++            if (id.toInt() == KEYBOARD_LED_REPORT_ID || id.toInt() == 0) {
++                _keyboardLedState.value = KeyboardLedState.fromOutputReport(data)
++            }
++        }
++
++        /** Output reports that arrive on the interrupt channel take the same path. */
++        override fun onInterruptData(device: BluetoothDevice?, reportId: Byte, data: ByteArray?) {
++            super.onInterruptData(device, reportId, data)
++            if (reportId.toInt() == KEYBOARD_LED_REPORT_ID && data != null) {
++                _keyboardLedState.value = KeyboardLedState.fromOutputReport(data)
++            }
++        }
++
++        /**
++         * Minimal GET_REPORT support: the host may ask for the current input or
++         * LED state instead of waiting for the next report. Answering with the
++         * last report keeps that request from stalling the link.
++         */
++        @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
++        override fun onGetReport(device: BluetoothDevice?, type: Byte, id: Byte, bufferSize: Int) {
++            super.onGetReport(device, type, id, bufferSize)
++            val report = when (type) {
++                BluetoothHidDevice.REPORT_TYPE_INPUT -> when (id.toInt()) {
++                    MOUSE_REPORT_ID -> lastMouseReport
++                    KEYBOARD_REPORT_ID -> lastKeyboardReport
++                    else -> null
++                }
++
++                BluetoothHidDevice.REPORT_TYPE_OUTPUT -> when (id.toInt()) {
++                    KEYBOARD_LED_REPORT_ID -> byteArrayOf(_keyboardLedState.value.byte)
++                    else -> null
++                }
++
++                else -> null
++            } ?: return
++
++            if (!checkBluetoothConnectPermission(context)) return
++            val hidDevice = bluetoothHidDevice ?: return
++            val target = device ?: bluetoothDevice ?: return
++            val data = if (bufferSize in 1 until report.size) {
++                report.copyOf(bufferSize)
++            } else {
++                report
++            }
++            hidDevice.replyReport(target, type, id, data)
++        }
+     }
+ 
+     // ---- Device Connection ----
+@@ -193,6 +258,19 @@ class BluetoothHidCore(
+     )
+     val deviceHidConnectionState: StateFlow<DeviceHidConnectionState> = _deviceHidConnectionState
+ 
++    private val _keyboardLedState: MutableStateFlow<KeyboardLedState> = MutableStateFlow(KeyboardLedState.EMPTY)
++    val keyboardLedState: StateFlow<KeyboardLedState> = _keyboardLedState
++
++    /** Last reports sent to the host, so GET_REPORT has something current to answer with. */
++    private var lastKeyboardReport: ByteArray = ByteArray(KEYBOARD_REPORT_SIZE)
++    private var lastMouseReport: ByteArray = ByteArray(MOUSE_REPORT_SIZE)
++
++    private fun clearReportCache() {
++        _keyboardLedState.value = KeyboardLedState.EMPTY
++        lastKeyboardReport = ByteArray(KEYBOARD_REPORT_SIZE)
++        lastMouseReport = ByteArray(MOUSE_REPORT_SIZE)
++    }
++
+     // ---- Send Report ----
+ 
+     private fun sendAndroidReport(
+@@ -213,7 +291,18 @@ class BluetoothHidCore(
+                 }
+             }
+         }
++        if (success) {
++            when (id) {
++                KEYBOARD_REPORT_ID -> lastKeyboardReport = bytes.copyOf(KEYBOARD_REPORT_SIZE)
++                MOUSE_REPORT_ID -> lastMouseReport = bytes.copyOf(MOUSE_REPORT_SIZE)
++            }
++        }
+         return success
+     }
+ 
++    private companion object {
++        const val KEYBOARD_REPORT_SIZE = 8
++        const val MOUSE_REPORT_SIZE = 4
++    }
++
+ }
+diff --git a/app/src/main/java/com/atharok/btremote/data/repositories/BluetoothRepositoryImpl.kt b/app/src/main/java/com/atharok/btremote/data/repositories/BluetoothRepositoryImpl.kt
+index 871fab5..dede93c 100644
+--- a/app/src/main/java/com/atharok/btremote/data/repositories/BluetoothRepositoryImpl.kt
++++ b/app/src/main/java/com/atharok/btremote/data/repositories/BluetoothRepositoryImpl.kt
+@@ -7,6 +7,7 @@ import com.atharok.btremote.data.bluetooth.BluetoothScanner
+ import com.atharok.btremote.data.bluetooth.BluetoothStatus
+ import com.atharok.btremote.domain.entities.DeviceEntity
+ import com.atharok.btremote.domain.entities.DeviceHidConnectionState
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLedState
+ import com.atharok.btremote.domain.repositories.BluetoothRepository
+ import com.atharok.btremote.domain.resources.Result
+ import kotlinx.coroutines.flow.StateFlow
+@@ -82,6 +83,10 @@ class BluetoothRepositoryImpl(
+         return bluetoothHidCore.deviceHidConnectionState
+     }
+ 
++    override fun getKeyboardLedState(): StateFlow<KeyboardLedState> {
++        return bluetoothHidCore.keyboardLedState
++    }
++
+     override fun sendReport(id: Int, bytes: ByteArray): Boolean {
+         return bluetoothHidCore.sendReport(id, bytes)
+     }
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardLedState.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardLedState.kt
+new file mode 100644
+index 0000000..63fa43c
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardLedState.kt
+@@ -0,0 +1,68 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard
++
++/**
++ * The LED state the host reports back through the keyboard LED output report.
++ *
++ * Only the first five bits are defined by the report descriptor; the rest of
++ * the byte is padding. Caps Lock is the bit the keyboard page draws, and it is
++ * read here instead of being latched locally.
++ *
++ * Platform limit: a host that never writes the LED output report leaves this
++ * state off, and the Caps dot then does not follow the host. Typing is never
++ * affected, because no Shift is ever synthesised for Caps Lock; only the visual
++ * state can lag behind the host.
++ */
++data class KeyboardLedState(
++    val numLock: Boolean = false,
++    val capsLock: Boolean = false,
++    val scrollLock: Boolean = false,
++    val compose: Boolean = false,
++    val kana: Boolean = false
++) {
++
++    /** The one-byte LED output report body. */
++    val byte: Byte
++        get() {
++            var value = 0
++            if (numLock) value = value or NUM_LOCK_BIT
++            if (capsLock) value = value or CAPS_LOCK_BIT
++            if (scrollLock) value = value or SCROLL_LOCK_BIT
++            if (compose) value = value or COMPOSE_BIT
++            if (kana) value = value or KANA_BIT
++            return value.toByte()
++        }
++
++    companion object {
++        val EMPTY = KeyboardLedState()
++
++        private const val NUM_LOCK_BIT = 0x01
++        private const val CAPS_LOCK_BIT = 0x02
++        private const val SCROLL_LOCK_BIT = 0x04
++        private const val COMPOSE_BIT = 0x08
++        private const val KANA_BIT = 0x10
++
++        fun fromLedByte(byte: Byte): KeyboardLedState {
++            val value = byte.toInt() and 0x1F
++            return KeyboardLedState(
++                numLock = value and NUM_LOCK_BIT != 0,
++                capsLock = value and CAPS_LOCK_BIT != 0,
++                scrollLock = value and SCROLL_LOCK_BIT != 0,
++                compose = value and COMPOSE_BIT != 0,
++                kana = value and KANA_BIT != 0
++            )
++        }
++
++        /**
++         * Parses the payload of an LED output report.
++         *
++         * A numbered report is one byte, but some host stacks prepend the report
++         * ID and hand over two. The descriptor gives this report a single data
++         * byte, so anything longer carries the ID first and the state second.
++         */
++        fun fromOutputReport(data: ByteArray): KeyboardLedState = when (data.size) {
++            0 -> EMPTY
++            1 -> fromLedByte(data[0])
++            else -> fromLedByte(data[1])
++        }
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportState.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportState.kt
+index 92a0b16..5c17b4b 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportState.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportState.kt
+@@ -1,5 +1,12 @@
+ package com.atharok.btremote.domain.entities.remoteInput.keyboard
+ 
++/**
++ * The keys and modifier keys currently held by the on-screen keyboard.
++ *
++ * Caps Lock is deliberately absent: it is a state the host keeps and reports
++ * back through the HID LED output. The keyboard only sends the Caps Lock key
++ * tap, and never folds Shift into a report of its own.
++ */
+ class KeyboardReportState {
+ 
+     private val pressedKeys = linkedSetOf<Byte>()
+@@ -7,13 +14,6 @@ class KeyboardReportState {
+     private val modifierCounts = mutableMapOf<Byte, Int>()
+     private var modifierMask: Int = 0
+ 
+-    /**
+-     * Caps Lock is a latch on the host. It survives a clear so backgrounding and
+-     * returning cannot leave the on-screen state disagreeing with the Mac.
+-     */
+-    var isCapsLockOn: Boolean = false
+-        private set
+-
+     fun pressModifier(modifier: Byte): ByteArray {
+         val count = (modifierCounts[modifier] ?: 0) + 1
+         modifierCounts[modifier] = count
+@@ -58,16 +58,19 @@ class KeyboardReportState {
+         return report()
+     }
+ 
+-    fun toggleCapsLock(): List<ByteArray> {
+-        isCapsLockOn = !isCapsLockOn
+-        return listOf(
+-            // Fold held keys into the Caps tap, then restore the held-key report
+-            // instead of clearing them: toggling Caps must not drop a key the user
+-            // is still holding.
+-            report(extraKeys = listOf(KeyboardKey.KEY_CAPS_LOCK.byte)),
+-            report()
+-        )
+-    }
++    /** The report for the state as it stands. */
++    val report: ByteArray get() = report()
++
++    /**
++     * The Caps Lock tap: the held-key report with Caps folded in, then the
++     * held-key report again. Holding a key while tapping Caps therefore keeps
++     * that key down, and no Shift is ever synthesised — the host owns Caps Lock
++     * and reports its LED back.
++     */
++    fun capsLockTap(): List<ByteArray> = listOf(
++        report(extraKeys = listOf(KeyboardKey.KEY_CAPS_LOCK.byte)),
++        report()
++    )
+ 
+     /**
+      * Releases held keys and modifiers and returns the clearing report. Safe to
+@@ -83,16 +86,12 @@ class KeyboardReportState {
+     }
+ 
+     private fun report(extraKeys: List<Byte> = emptyList()): ByteArray {
+-        val keys = (pressedKeys + extraKeys).take(MAX_KEYS)
+-        val effectiveModifiers =
+-            if (isCapsLockOn && keys.any { it.toInt() in LETTER_USAGE_RANGE }) {
+-                modifierMask or KeyboardKey.KEY_SHIFT_LEFT.byte.toInt()
+-            } else {
+-                modifierMask
+-            }
++        // Extra usages go first so a tap is never dropped when six other keys
++        // are already down.
++        val keys = (extraKeys + pressedKeys).take(MAX_KEYS)
+ 
+         return byteArrayOf(
+-            effectiveModifiers.toByte(),
++            modifierMask.toByte(),
+             0,
+             keys.getOrElse(0) { 0 },
+             keys.getOrElse(1) { 0 },
+@@ -106,6 +105,5 @@ class KeyboardReportState {
+     private companion object {
+         const val REPORT_SIZE = 8
+         const val MAX_KEYS = 6
+-        val LETTER_USAGE_RANGE = 0x04..0x1D
+     }
+ }
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/KeyboardGridMetrics.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/KeyboardGridMetrics.kt
+new file mode 100644
+index 0000000..b8b2f24
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/KeyboardGridMetrics.kt
+@@ -0,0 +1,47 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
++
++/**
++ * Horizontal grid shared by every MacBook row.
++ *
++ * The grid is 14.5 key units wide: Escape is 1.5u and the twelve function keys
++ * split the remaining 13u, while the rows below use Apple's 1u letters with
++ * 1.5u Tab/Backspace and 1.75u Caps/Return.
++ *
++ * The gap belongs to each key's own slot instead of being spaced between keys.
++ * Rows with different key counts therefore keep the same unit pitch, which is
++ * what keeps a 1u key in the same column as the row above it.
++ */
++object KeyboardGridMetrics {
++
++    const val TOTAL_UNITS: Float = 14.5f
++
++    fun unitWidth(width: Float): Float = if (width <= 0f) 0f else width / TOTAL_UNITS
++
++    /** Left edge of a slot, with half the row gap added on each side. */
++    fun slotStartX(startUnits: Float, width: Float, gap: Float): Float =
++        startUnits * unitWidth(width) + gap / 2f
++
++    fun slotWidth(widthUnits: Float, width: Float, gap: Float): Float =
++        (widthUnits * unitWidth(width) - gap).coerceAtLeast(0f)
++}
++
++/**
++ * Vertical geometry of one stacked grid cell, such as the bottom row's Up/Down
++ * pair.
++ *
++ * The cell is split into two equal touch bands that meet exactly at the middle,
++ * so a finger anywhere in the cell lands on one of the two arrows and no dead
++ * strip sits between them. The visible caps keep the row gap by pulling each one
++ * back from that shared edge by half the gap: the gap is drawn, but it is not
++ * untouchable.
++ */
++object StackedKeyCellGeometry {
++
++    fun touchHeight(cellHeight: Float): Float = (cellHeight / 2f).coerceAtLeast(0f)
++
++    fun capInset(cellHeight: Float, gap: Float): Float =
++        (gap / 2f).coerceAtLeast(0f).coerceAtMost(touchHeight(cellHeight))
++
++    fun capHeight(cellHeight: Float, gap: Float): Float =
++        (touchHeight(cellHeight) - capInset(cellHeight, gap)).coerceAtLeast(0f)
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayout.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayout.kt
+index 3bf884a..976979e 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayout.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayout.kt
+@@ -22,40 +22,62 @@ enum class MacKeyboardKeyKind {
+     MODIFIER
+ }
+ 
++/**
++ * One grid cell of a row.
++ *
++ * [stackedBelow] makes the cell hold two independent caps, each with half the
++ * cell height, in the same 1u column. Up is the cell itself and Down is the half
++ * below it; both keep their own touch layer, press state and action.
++ */
+ data class MacKeyboardKey(
+     val key: AdvancedKeyboardKey,
+-    val kind: MacKeyboardKeyKind
++    val kind: MacKeyboardKeyKind,
++    val stackedBelow: MacKeyboardKey? = null
+ ) {
+     val byte: Byte get() = key.byte
+     val weight: Float get() = key.weight
+     val behavior: AdvancedKeyBehavior get() = key.behavior
+ }
+ 
++/**
++ * A row is a list of grid cells. [totalWeight] counts each cell once, so a
++ * stacked Up/Down cell contributes 1u and not the 2u of its two caps.
++ */
+ data class MacKeyboardRow(val keys: List<MacKeyboardKey>) {
+     val totalWeight: Float get() = keys.sumOf { it.weight.toDouble() }.toFloat()
++
++    /** Every pressable cap, including the half-height cap below a stacked cell. */
++    val caps: List<MacKeyboardKey>
++        get() = keys.flatMap { key -> listOfNotNull(key, key.stackedBelow) }
+ }
+ 
+ data class MacKeyboardLayout(val rows: List<MacKeyboardRow>) {
+-    val keys: List<MacKeyboardKey> get() = rows.flatMap { it.keys }
++    val keys: List<MacKeyboardKey> get() = rows.flatMap { it.caps }
+ }
+ 
+-/** Structural key widths of the MacBook presentation, expressed in key units. */
++/**
++ * Structural key widths of the MacBook presentation, expressed in key units.
++ *
++ * Every row sums to [KeyboardGridMetrics.TOTAL_UNITS] (14.5u).
++ */
+ object MacKeyboardKeyWeight {
+     const val ORDINARY = 1f
+     const val ESCAPE = 1.5f
+-    const val FUNCTION = 1.125f
++
++    /** Esc is 1.5u, so the twelve function keys split the remaining 13u. */
++    const val FUNCTION = 13f / 12f
++
+     const val TAB = 1.5f
+-    const val BACKSPACE = 2f
+-    const val ROW_BACKSLASH = 1.5f
++    const val BACKSPACE = 1.5f
++    const val ROW_BACKSLASH = 1f
+     const val CAPS_LOCK = 1.75f
+-    const val SHIFT_LEFT = 2.25f
+-    const val SHIFT_RIGHT = 1.75f
+-    const val ENTER = 2.25f
+-    const val SPACE = 5f
+-    const val BOTTOM_MODIFIER = 1.25f
+-    const val ARROW_LEFT = 1f
+-    const val ARROW_DOWN = 1f
+-    const val ARROW_RIGHT = 1.75f
++    const val ENTER = 1.75f
++    const val SHIFT = 2.25f
++    const val SPACE = 6f
++    const val CONTROL = 1f
++    const val OPTION = 1f
++    const val COMMAND = 1.25f
++    const val ARROW = 1f
+ }
+ 
+ /**
+@@ -124,8 +146,8 @@ object MacKeyboardSpec {
+ 
+     /**
+      * MacBook function row: a wider Escape, then F1–F12 dividing the rest of the
+-     * fifteen-unit grid evenly. There is no Print Screen and no standalone
+-     * forward delete.
++     * 14.5-unit grid evenly. There is no Print Screen and no standalone forward
++     * delete, and no Fn/Globe key on the left.
+      */
+     val functionRow = MacKeyboardRow(listOf(escape) + functionKeys)
+ 
+@@ -150,43 +172,50 @@ object MacKeyboardSpec {
+         byte = KeyboardKey.KEY_SHIFT_LEFT.byte,
+         textRes = R.string.shift,
+         textAlign = TextAlign.Start,
+-        weight = MacKeyboardKeyWeight.SHIFT_LEFT
++        weight = MacKeyboardKeyWeight.SHIFT
+     )
+ 
+     val shiftRight = modifierKey(
+         byte = KeyboardKey.KEY_SHIFT_RIGHT.byte,
+         textRes = R.string.shift,
+         textAlign = TextAlign.End,
+-        weight = MacKeyboardKeyWeight.SHIFT_RIGHT
++        weight = MacKeyboardKeyWeight.SHIFT
+     )
+ 
+-    val upArrow = iconKey(RemoteButtonProperties.KeyboardUpButton, MacKeyboardKeyWeight.ORDINARY)
++    val leftArrow = iconKey(RemoteButtonProperties.KeyboardLeftButton, MacKeyboardKeyWeight.ARROW)
+ 
+-    val leftArrow = iconKey(RemoteButtonProperties.KeyboardLeftButton, MacKeyboardKeyWeight.ARROW_LEFT)
++    val rightArrow = iconKey(RemoteButtonProperties.KeyboardRightButton, MacKeyboardKeyWeight.ARROW)
+ 
+-    val downArrow = iconKey(RemoteButtonProperties.KeyboardDownButton, MacKeyboardKeyWeight.ARROW_DOWN)
+-
+-    val rightArrow = iconKey(RemoteButtonProperties.KeyboardRightButton, MacKeyboardKeyWeight.ARROW_RIGHT)
++    /** Up and Down share one 1u column; the bottom cap is half the cell tall. */
++    val upDownColumn = iconKey(
++        RemoteButtonProperties.KeyboardUpButton,
++        MacKeyboardKeyWeight.ARROW
++    ).copy(
++        stackedBelow = iconKey(
++            RemoteButtonProperties.KeyboardDownButton,
++            MacKeyboardKeyWeight.ARROW
++        )
++    )
+ 
+     val controlLeft = modifierKey(
+         byte = KeyboardKey.KEY_CTRL_LEFT.byte,
+         textRes = R.string.ctrl,
+         textAlign = TextAlign.Start,
+-        weight = MacKeyboardKeyWeight.BOTTOM_MODIFIER
++        weight = MacKeyboardKeyWeight.CONTROL
+     )
+ 
+     val optionLeft = modifierKey(
+         byte = KeyboardKey.KEY_ALT.byte,
+         textRes = R.string.alt,
+         textAlign = TextAlign.Start,
+-        weight = MacKeyboardKeyWeight.BOTTOM_MODIFIER
++        weight = MacKeyboardKeyWeight.OPTION
+     )
+ 
+     val commandLeft = modifierKey(
+         byte = KeyboardKey.KEY_META_LEFT.byte,
+         textRes = R.string.meta,
+         textAlign = TextAlign.Start,
+-        weight = MacKeyboardKeyWeight.BOTTOM_MODIFIER
++        weight = MacKeyboardKeyWeight.COMMAND
+     )
+ 
+     val space = iconKey(RemoteButtonProperties.KeyboardSpaceBarButton, MacKeyboardKeyWeight.SPACE)
+@@ -195,7 +224,7 @@ object MacKeyboardSpec {
+         byte = KeyboardKey.KEY_META_RIGHT.byte,
+         textRes = R.string.meta,
+         textAlign = TextAlign.End,
+-        weight = MacKeyboardKeyWeight.BOTTOM_MODIFIER
++        weight = MacKeyboardKeyWeight.COMMAND
+     )
+ 
+     /** Right Option. It keeps the Alt Gr usage so ISO layouts never lose that modifier. */
+@@ -203,7 +232,7 @@ object MacKeyboardSpec {
+         byte = KeyboardKey.KEY_ALT_GR.byte,
+         textRes = R.string.alt_gr,
+         textAlign = TextAlign.End,
+-        weight = MacKeyboardKeyWeight.BOTTOM_MODIFIER
++        weight = MacKeyboardKeyWeight.OPTION
+     )
+ 
+     val bottomRow = MacKeyboardRow(
+@@ -215,7 +244,7 @@ object MacKeyboardSpec {
+             commandRight,
+             optionRight,
+             leftArrow,
+-            downArrow,
++            upDownColumn,
+             rightArrow
+         )
+     )
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactory.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactory.kt
+index eece285..b4b1463 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactory.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactory.kt
+@@ -50,6 +50,8 @@ object MacKeyboardLayoutFactory {
+             add(MacKeyboardSpec.enter)
+         }
+ 
++        // The arrows are not on this row: Up and Down share one stacked cell on
++        // the bottom row, the way the MacBook arranges them.
+         val shiftRow = buildList {
+             add(MacKeyboardSpec.shiftLeft)
+             addAll(
+@@ -57,7 +59,6 @@ object MacKeyboardLayoutFactory {
+                     .filterNot { it.byte in shiftRowMovedUsages }
+                     .map { it.toMacKey(MacKeyboardKeyWeight.ORDINARY) }
+             )
+-            add(MacKeyboardSpec.upArrow)
+             add(MacKeyboardSpec.shiftRight)
+         }
+ 
+diff --git a/app/src/main/java/com/atharok/btremote/domain/repositories/BluetoothRepository.kt b/app/src/main/java/com/atharok/btremote/domain/repositories/BluetoothRepository.kt
+index b136a29..fd2a492 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/repositories/BluetoothRepository.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/repositories/BluetoothRepository.kt
+@@ -3,6 +3,7 @@ package com.atharok.btremote.domain.repositories
+ import androidx.compose.runtime.snapshots.SnapshotStateList
+ import com.atharok.btremote.domain.entities.DeviceEntity
+ import com.atharok.btremote.domain.entities.DeviceHidConnectionState
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLedState
+ import com.atharok.btremote.domain.resources.Result
+ import kotlinx.coroutines.flow.StateFlow
+ 
+@@ -45,6 +46,8 @@ interface BluetoothRepository {
+ 
+     fun getDeviceHidConnectionState(): StateFlow<DeviceHidConnectionState>
+ 
++    fun getKeyboardLedState(): StateFlow<KeyboardLedState>
++
+     fun sendReport(id: Int, bytes: ByteArray): Boolean
+ 
+ }
+diff --git a/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt b/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt
+index 75347cb..07c99ee 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/usecases/RemoteUseCase.kt
+@@ -1,5 +1,6 @@
+ package com.atharok.btremote.domain.usecases
+ 
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLedState
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.HapticIntensity
+ import com.atharok.btremote.domain.entities.settings.HapticSettings
+@@ -9,6 +10,7 @@ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.domain.repositories.BluetoothRepository
+ import com.atharok.btremote.domain.repositories.DataStoreRepository
+ import kotlinx.coroutines.flow.Flow
++import kotlinx.coroutines.flow.StateFlow
+ 
+ class RemoteUseCase(
+     private val bluetoothRepository: BluetoothRepository,
+@@ -107,6 +109,8 @@ class RemoteUseCase(
+         return bluetoothRepository.disconnectDevice()
+     }
+ 
++    val keyboardLedState: StateFlow<KeyboardLedState> get() = bluetoothRepository.getKeyboardLedState()
++
+     // ---- Send ----
+ 
+     fun sendReport(id: Int, bytes: ByteArray): Boolean {
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
+index 5702993..40970bf 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
+@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
+ import com.atharok.btremote.common.utils.KEYBOARD_REPORT_ID
+ import com.atharok.btremote.common.utils.MOUSE_REPORT_ID
+ import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLedState
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.HapticIntensity
+ import com.atharok.btremote.domain.entities.settings.HapticSettings
+@@ -13,6 +14,7 @@ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.domain.usecases.RemoteUseCase
+ import kotlinx.coroutines.flow.Flow
++import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.launch
+ import kotlin.math.roundToInt
+ 
+@@ -110,6 +112,9 @@ class RemoteViewModel(
+ 
+     fun disconnectDevice(): Boolean = useCase.disconnectDevice()
+ 
++    /** Caps Lock and the other host LEDs, read back from the keyboard LED output. */
++    val keyboardLedState: StateFlow<KeyboardLedState> get() = useCase.keyboardLedState
++
+     // ---- Send ----
+ 
+     fun sendReport(id: Int, bytes: ByteArray): Boolean {
+diff --git a/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt b/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
+index 4cc2241..88a7be1 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
+@@ -1,29 +1,46 @@
+ package com.atharok.btremote.ui.views.keyboard
+ 
++import androidx.compose.foundation.background
++import androidx.compose.foundation.gestures.awaitEachGesture
++import androidx.compose.foundation.gestures.awaitFirstDown
++import androidx.compose.foundation.gestures.waitForUpOrCancellation
+ import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.BoxWithConstraints
+ import androidx.compose.foundation.layout.Column
+-import androidx.compose.foundation.layout.ColumnScope
++import androidx.compose.foundation.layout.PaddingValues
+ import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.shape.CircleShape
+ import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.Icon
++import androidx.compose.material3.MaterialTheme
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.runtime.getValue
++import androidx.compose.runtime.key
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberUpdatedState
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
+ import androidx.compose.ui.graphics.Shape
+ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.layout.Layout
+ import androidx.compose.ui.platform.LocalConfiguration
+ import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.platform.LocalDensity
+ import androidx.compose.ui.platform.LocalHapticFeedback
+ import androidx.compose.ui.platform.LocalLayoutDirection
+ import androidx.compose.ui.res.dimensionResource
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.unit.Constraints
+ import androidx.compose.ui.unit.Dp
+ import androidx.compose.ui.unit.LayoutDirection
+ import androidx.compose.ui.unit.dp
+@@ -31,20 +48,35 @@ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.LifecycleEventObserver
+ import androidx.lifecycle.compose.LocalLifecycleOwner
+ import com.atharok.btremote.R
++import com.atharok.btremote.common.utils.AppIcons
+ import com.atharok.btremote.domain.entities.remoteInput.InputReleaseCoordinator
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardReportState
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
+-import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardKey
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyboardLayout
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.EnglishUSAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.IconAdvancedKeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.mac.KeyboardGridMetrics
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.mac.MacKeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.mac.MacKeyboardKeyKind
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.mac.MacKeyboardLayout
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.mac.MacKeyboardLayoutFactory
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.mac.MacKeyboardRow
++import com.atharok.btremote.ui.components.AdaptiveText
++import com.atharok.btremote.ui.components.DefaultElevatedCard
++import com.atharok.btremote.ui.components.customButtons.SurfaceButton
+ import com.atharok.btremote.ui.haptics.LocalButtonHapticsEnabled
+ import com.atharok.btremote.ui.theme.surfaceElevationHigh
++import kotlin.math.roundToInt
+ 
+ /** The tallest a single key grows before the rows are centred in the page. */
+ private val MaximumKeyHeight = 64.dp
++
++/** Shortest a key gets before the keyboard stops scaling down. */
++private val MinimumKeyHeight = 28.dp
++
++/** Vertical gap between rows. Horizontally the same gap lives inside each slot. */
++private val KeyboardRowGap = 4.dp
++
+ private const val RowCount = 6
+ 
+ /**
+@@ -52,14 +84,16 @@ private const val RowCount = 6
+  *
+  * The US ANSI layout is fixed: the app no longer chooses among languages, and
+  * Chinese text is produced by the controlled Mac's input method. The report
+- * state is owned by the page, so Caps Lock and held modifiers survive switching
+- * to the trackpad and back.
++ * state is owned by the page, so held modifiers survive switching to the
++ * trackpad and back. Caps Lock is not latched here: the host owns it and its
++ * LED state is only displayed.
+  */
+ @Composable
+ fun AdvancedKeyboard(
+     reportState: KeyboardReportState,
+     sendKeyboardKeyReport: (bytes: ByteArray) -> Unit,
+     releaseCoordinator: InputReleaseCoordinator,
++    capsLockOn: Boolean,
+     modifier: Modifier = Modifier,
+     shape: Shape = RoundedCornerShape(dimensionResource(id = R.dimen.keyboard_key_corner_radius)),
+     keyElevation: Dp = surfaceElevationHigh()
+@@ -95,7 +129,7 @@ fun AdvancedKeyboard(
+         }
+     }
+ 
+-    fun sendKeyDown(key: AdvancedKeyboardKey) {
++    fun keyDown(key: MacKeyboardKey) {
+         hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+         when (key.behavior) {
+             AdvancedKeyBehavior.KEY -> {
+@@ -106,13 +140,16 @@ fun AdvancedKeyboard(
+                 currentSendKeyboardKeyReport(reportState.pressModifier(key.byte))
+             }
+ 
++            // The Caps tap is folded into the held-key report and followed by
++            // that same held-key report, so toggling Caps never drops a key the
++            // user is still holding and never synthesises Shift.
+             AdvancedKeyBehavior.CAPS_LOCK -> {
+-                reportState.toggleCapsLock().forEach(currentSendKeyboardKeyReport)
++                reportState.capsLockTap().forEach(currentSendKeyboardKeyReport)
+             }
+         }
+     }
+ 
+-    fun sendKeyUp(key: AdvancedKeyboardKey) {
++    fun keyUp(key: MacKeyboardKey) {
+         when (key.behavior) {
+             AdvancedKeyBehavior.KEY -> {
+                 currentSendKeyboardKeyReport(reportState.releaseKey(key.byte))
+@@ -134,31 +171,30 @@ fun AdvancedKeyboard(
+             modifier = modifier,
+             contentAlignment = Alignment.Center
+         ) {
+-            val spacing = dimensionResource(id = R.dimen.padding_min)
+             val availableHeight = if (constraints.hasBoundedHeight) {
+                 maxHeight
+             } else {
+                 configuration.screenHeightDp.dp
+             }
+-            val keyboardHeight = minOf(
+-                availableHeight,
+-                MaximumKeyHeight * RowCount + spacing * (RowCount - 1)
+-            )
++            val idealKeyHeight = (availableHeight - KeyboardRowGap * (RowCount - 1)) / RowCount
++            val keyHeight = idealKeyHeight.coerceIn(MinimumKeyHeight, MaximumKeyHeight)
+ 
+             Column(
+                 modifier = Modifier
+                     .fillMaxWidth()
+-                    .height(keyboardHeight),
+-                verticalArrangement = Arrangement.spacedBy(spacing)
++                    .height(keyHeight * RowCount + KeyboardRowGap * (RowCount - 1)),
++                verticalArrangement = Arrangement.spacedBy(KeyboardRowGap)
+             ) {
+                 macKeyboardLayout.rows.forEach { macKeyboardRow ->
+                     MacKeyboardRowView(
+                         row = macKeyboardRow,
+-                        spacing = spacing,
++                        gap = KeyboardRowGap,
++                        keyHeight = keyHeight,
++                        capsLockOn = capsLockOn,
+                         shape = shape,
+                         elevation = keyElevation,
+-                        onKeyDown = ::sendKeyDown,
+-                        onKeyUp = ::sendKeyUp
++                        onKeyDown = ::keyDown,
++                        onKeyUp = ::keyUp
+                     )
+                 }
+             }
+@@ -166,29 +202,215 @@ fun AdvancedKeyboard(
+     }
+ }
+ 
++/**
++ * Places the row's keys on the shared 14.5-unit grid. The gap is taken out of
++ * each key's slot instead of being arranged between keys, so a 1u cap has the
++ * same width in every row and keys stay in the same column as the row above.
++ */
+ @Composable
+-private fun ColumnScope.MacKeyboardRowView(
++private fun MacKeyboardRowView(
+     row: MacKeyboardRow,
+-    spacing: Dp,
++    gap: Dp,
++    keyHeight: Dp,
++    capsLockOn: Boolean,
+     shape: Shape,
+     elevation: Dp,
+-    onKeyDown: (AdvancedKeyboardKey) -> Unit,
+-    onKeyUp: (AdvancedKeyboardKey) -> Unit
++    onKeyDown: (MacKeyboardKey) -> Unit,
++    onKeyUp: (MacKeyboardKey) -> Unit
+ ) {
+-    Row(
++    val gapPx = with(LocalDensity.current) { gap.toPx() }
++
++    Layout(
+         modifier = Modifier
+             .fillMaxWidth()
+-            .weight(1f),
+-        horizontalArrangement = Arrangement.spacedBy(spacing)
++            .height(keyHeight),
++        content = {
++            row.keys.forEach { macKey ->
++                key(macKey.byte) {
++                    when {
++                        macKey.stackedBelow != null -> StackedArrowCell(
++                            macKey = macKey,
++                            gap = gap,
++                            shape = shape,
++                            elevation = elevation,
++                            onKeyDown = onKeyDown,
++                            onKeyUp = onKeyUp
++                        )
++
++                        macKey.kind == MacKeyboardKeyKind.CAPS_LOCK -> CapsLockKeyCell(
++                            isOn = capsLockOn,
++                            shape = shape,
++                            elevation = elevation,
++                            onKeyDown = { onKeyDown(macKey) },
++                            onKeyUp = { onKeyUp(macKey) }
++                        )
++
++                        else -> macKey.key.KeyboardKeyView(
++                            touchDown = { onKeyDown(macKey) },
++                            touchUp = { onKeyUp(macKey) },
++                            modifier = Modifier.fillMaxSize(),
++                            shape = shape,
++                            elevation = elevation
++                        )
++                    }
++                }
++            }
++        }
++    ) { measurables, constraints ->
++        val width = constraints.maxWidth.toFloat()
++        val height = constraints.maxHeight
++        var startUnits = 0f
++        val placements = measurables.mapIndexed { index, measurable ->
++            val macKey = row.keys[index]
++            val x = KeyboardGridMetrics.slotStartX(startUnits, width, gapPx).roundToInt()
++            val slotWidth = KeyboardGridMetrics.slotWidth(macKey.weight, width, gapPx).roundToInt()
++            startUnits += macKey.weight
++            x to measurable.measure(Constraints.fixed(slotWidth, height))
++        }
++
++        layout(constraints.maxWidth, height) {
++            placements.forEach { (x, placeable) ->
++                placeable.placeRelative(x, 0)
++            }
++        }
++    }
++}
++
++/**
++ * The Up/Down column: two half-height touch bands that meet exactly at the
++ * middle. Each band owns its press and release, so the two arrows stay
++ * independently pressable and no dead strip sits between them. The visible caps
++ * are pulled back from the shared edge by half the row gap, which draws the gap
++ * without making it untouchable.
++ */
++@Composable
++private fun StackedArrowCell(
++    macKey: MacKeyboardKey,
++    gap: Dp,
++    shape: Shape,
++    elevation: Dp,
++    onKeyDown: (MacKeyboardKey) -> Unit,
++    onKeyUp: (MacKeyboardKey) -> Unit
++) {
++    val below = macKey.stackedBelow ?: return
++    Column(modifier = Modifier.fillMaxSize()) {
++        ArrowHalfKey(
++            macKey = macKey,
++            visualPadding = PaddingValues(bottom = gap / 2),
++            shape = shape,
++            elevation = elevation,
++            onKeyDown = onKeyDown,
++            onKeyUp = onKeyUp,
++            modifier = Modifier
++                .weight(1f)
++                .fillMaxWidth()
++        )
++        ArrowHalfKey(
++            macKey = below,
++            visualPadding = PaddingValues(top = gap / 2),
++            shape = shape,
++            elevation = elevation,
++            onKeyDown = onKeyDown,
++            onKeyUp = onKeyUp,
++            modifier = Modifier
++                .weight(1f)
++                .fillMaxWidth()
++        )
++    }
++}
++
++@Composable
++private fun ArrowHalfKey(
++    macKey: MacKeyboardKey,
++    visualPadding: PaddingValues,
++    shape: Shape,
++    elevation: Dp,
++    onKeyDown: (MacKeyboardKey) -> Unit,
++    onKeyUp: (MacKeyboardKey) -> Unit,
++    modifier: Modifier = Modifier
++) {
++    val currentKeyDown by rememberUpdatedState(onKeyDown)
++    val currentKeyUp by rememberUpdatedState(onKeyUp)
++    val hapticFeedback = LocalHapticFeedback.current
++    val properties = (macKey.key as? IconAdvancedKeyboardKey)?.properties
++
++    Box(
++        modifier = modifier.pointerInput(macKey.byte) {
++            awaitEachGesture {
++                awaitFirstDown(requireUnconsumed = false)
++                hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
++                currentKeyDown(macKey)
++                try {
++                    waitForUpOrCancellation()
++                } finally {
++                    currentKeyUp(macKey)
++                }
++            }
++        }
+     ) {
+-        row.keys.forEach { macKey ->
+-            val keyboardKey = macKey.key
+-            keyboardKey.KeyboardKeyView(
+-                touchDown = { onKeyDown(keyboardKey) },
+-                touchUp = { onKeyUp(keyboardKey) },
+-                modifier = Modifier.weight(keyboardKey.weight),
+-                shape = shape,
+-                elevation = elevation
++        DefaultElevatedCard(
++            modifier = Modifier
++                .fillMaxSize()
++                .padding(visualPadding),
++            shape = shape,
++            elevation = elevation
++        ) {
++            Box(
++                modifier = Modifier.fillMaxSize(),
++                contentAlignment = Alignment.Center
++            ) {
++                Icon(
++                    imageVector = properties?.icon ?: AppIcons.KeyboardArrowUp,
++                    contentDescription = properties?.let { stringResource(id = it.stringRes) },
++                    modifier = Modifier.fillMaxSize(0.45f)
++                )
++            }
++        }
++    }
++}
++
++/**
++ * Caps Lock is drawn from the host LED state. The dot is red while the host
++ * reports the LED on; nothing on this cap latches locally.
++ */
++@Composable
++private fun CapsLockKeyCell(
++    isOn: Boolean,
++    shape: Shape,
++    elevation: Dp,
++    onKeyDown: () -> Unit,
++    onKeyUp: () -> Unit
++) {
++    SurfaceButton(
++        touchDown = onKeyDown,
++        touchUp = onKeyUp,
++        modifier = Modifier.fillMaxSize(),
++        shape = shape,
++        elevation = elevation
++    ) {
++        Row(
++            modifier = Modifier
++                .fillMaxSize()
++                .padding(horizontal = dimensionResource(id = R.dimen.padding_small)),
++            verticalAlignment = Alignment.CenterVertically,
++            horizontalArrangement = Arrangement.spacedBy(dimensionResource(id = R.dimen.padding_min))
++        ) {
++            Box(
++                modifier = Modifier
++                    .size(5.dp)
++                    .clip(CircleShape)
++                    .background(
++                        if (isOn) {
++                            MaterialTheme.colorScheme.error
++                        } else {
++                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
++                        }
++                    )
++            )
++            AdaptiveText(
++                text = stringResource(id = R.string.caps_lock),
++                percent = 0.55f,
++                modifier = Modifier.fillMaxWidth()
+             )
+         }
+     }
+diff --git a/app/src/test/java/com/atharok/btremote/common/utils/HidReportDescriptorTest.kt b/app/src/test/java/com/atharok/btremote/common/utils/HidReportDescriptorTest.kt
+new file mode 100644
+index 0000000..41aa0d9
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/common/utils/HidReportDescriptorTest.kt
+@@ -0,0 +1,59 @@
++package com.atharok.btremote.common.utils
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class HidReportDescriptorTest {
++
++    private fun ByteArray.indexOfSequence(vararg bytes: Int): Int {
++        val target = bytes.map { it.toByte() }
++        return indices.firstOrNull { start ->
++            start + target.size <= size &&
++                target.indices.all { this[start + it] == target[it] }
++        } ?: -1
++    }
++
++    @Test
++    fun reportIdsMatchTheIosFinalProfile() {
++        assertEquals(1, MOUSE_REPORT_ID)
++        assertEquals(2, KEYBOARD_REPORT_ID)
++        assertEquals(3, KEYBOARD_LED_REPORT_ID)
++    }
++
++    @Test
++    fun descriptorDeclaresMouseKeyboardAndLedReportsOnly() {
++        val ids = listOf(MOUSE_REPORT_ID, KEYBOARD_REPORT_ID, KEYBOARD_LED_REPORT_ID)
++
++        assertEquals(113, bluetoothHidDescriptor.size)
++        ids.forEach { id ->
++            assertTrue("report ID $id", bluetoothHidDescriptor.indexOfSequence(0x85, id) >= 0)
++        }
++    }
++
++    @Test
++    fun descriptorNoLongerCarriesAConsumerCollection() {
++        // Usage Page (Consumer Devices) followed by Usage (Consumer Control).
++        assertEquals(-1, bluetoothHidDescriptor.indexOfSequence(0x05, 0x0C))
++        assertEquals(-1, bluetoothHidDescriptor.indexOfSequence(0x05, 0x0C, 0x09, 0x01))
++    }
++
++    @Test
++    fun keyboardCollectionAdvertisesTheLedOutputReport() {
++        assertTrue(bluetoothHidDescriptor.indexOfSequence(0x05, 0x08) >= 0)
++        assertTrue(bluetoothHidDescriptor.indexOfSequence(0x91, 0x02) >= 0)
++        assertTrue(bluetoothHidDescriptor.indexOfSequence(0x95, 0x05) >= 0)
++    }
++
++    @Test
++    fun descriptorKeepsKeyboardBeforeMouse() {
++        val keyboard = bluetoothHidDescriptor.indexOfSequence(0x85, KEYBOARD_REPORT_ID)
++        val led = bluetoothHidDescriptor.indexOfSequence(0x85, KEYBOARD_LED_REPORT_ID)
++        val mouse = bluetoothHidDescriptor.indexOfSequence(0x85, MOUSE_REPORT_ID)
++
++        assertTrue(keyboard in 0 until led)
++        assertTrue(led in 0 until mouse)
++        assertFalse(mouse < 0)
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardLedStateTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardLedStateTest.kt
+new file mode 100644
+index 0000000..ca18d07
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardLedStateTest.kt
+@@ -0,0 +1,72 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class KeyboardLedStateTest {
++
++    @Test
++    fun parsesTheThreeLockBitsTheHostReports() {
++        val numLock = KeyboardLedState.fromLedByte(0x01)
++        val capsLock = KeyboardLedState.fromLedByte(0x02)
++        val scrollLock = KeyboardLedState.fromLedByte(0x04)
++
++        assertTrue(numLock.numLock)
++        assertFalse(numLock.capsLock)
++
++        assertTrue(capsLock.capsLock)
++        assertFalse(capsLock.numLock)
++
++        assertTrue(scrollLock.scrollLock)
++    }
++
++    @Test
++    fun parsesTheExtraDescriptorBitsAndIgnoresPadding() {
++        val all = KeyboardLedState.fromLedByte(0x1F)
++        assertTrue(all.numLock)
++        assertTrue(all.capsLock)
++        assertTrue(all.scrollLock)
++        assertTrue(all.compose)
++        assertTrue(all.kana)
++
++        val paddingOnly = KeyboardLedState.fromLedByte(0xE0.toByte())
++        assertEquals(KeyboardLedState.EMPTY, paddingOnly)
++    }
++
++    @Test
++    fun writesTheSameBitsBackAsTheReportByte() {
++        val state = KeyboardLedState(numLock = true, capsLock = true, scrollLock = true)
++
++        assertEquals(0x07, state.byte.toInt())
++        assertEquals(state, KeyboardLedState.fromLedByte(state.byte))
++    }
++
++    @Test
++    fun emptyIsAllOff() {
++        assertEquals(0, KeyboardLedState.EMPTY.byte.toInt())
++        assertEquals(KeyboardLedState(), KeyboardLedState.EMPTY)
++    }
++
++    @Test
++    fun parsesAOneByteOutputReport() {
++        assertEquals(0x02, KeyboardLedState.fromOutputReport(byteArrayOf(0x02)).byte.toInt())
++        // 0x02 also reads as Caps when the host prefixes the report ID.
++        assertEquals(0x01, KeyboardLedState.fromOutputReport(byteArrayOf(0x01, 0x01)).byte.toInt())
++    }
++
++    @Test
++    fun parsesAnOutputReportThatCarriesTheReportIdFirst() {
++        // Report ID 3 followed by NumLock | CapsLock.
++        val state = KeyboardLedState.fromOutputReport(byteArrayOf(0x03, 0x03))
++
++        assertTrue(state.numLock)
++        assertTrue(state.capsLock)
++    }
++
++    @Test
++    fun anEmptyOutputReportLeavesEveryLedOff() {
++        assertEquals(KeyboardLedState.EMPTY, KeyboardLedState.fromOutputReport(ByteArray(0)))
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt
+index 0ae2886..83b3739 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/KeyboardReportStateTest.kt
+@@ -44,52 +44,40 @@ class KeyboardReportStateTest {
+     }
+ 
+     @Test
+-    fun capsLockAddsShiftOnlyToLetters() {
++    fun capsLockTapSendsCapsUsageWithoutSynthesisingShift() {
+         val state = KeyboardReportState()
+ 
+-        state.toggleCapsLock()
++        val reports = state.capsLockTap()
+ 
+         assertArrayEquals(
+             byteArrayOf(
+-                KeyboardKey.KEY_SHIFT_LEFT.byte,
+-                0,
+-                KeyboardKey.ROW_3_KEY_00.byte,
+-                0,
+-                0,
+                 0,
+                 0,
+-                0
+-            ),
+-            state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
+-        )
+-        state.releaseKey(KeyboardKey.ROW_3_KEY_00.byte)
+-        assertArrayEquals(
+-            byteArrayOf(
+-                0,
+-                0,
+-                KeyboardKey.ROW_1_KEY_01.byte,
++                KeyboardKey.KEY_CAPS_LOCK.byte,
+                 0,
+                 0,
+                 0,
+                 0,
+                 0
+             ),
+-            state.pressKey(KeyboardKey.ROW_1_KEY_01.byte)
++            reports[0]
+         )
++        assertArrayEquals(ByteArray(8), reports[1])
+     }
+ 
+     @Test
+-    fun capsLockTapSendsCapsThenZero() {
++    fun tappingCapsWhileAKeyIsHeldKeepsTheKeyInBothReports() {
+         val state = KeyboardReportState()
++        state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
+ 
+-        val reports = state.toggleCapsLock()
++        val reports = state.capsLockTap()
+ 
+         assertArrayEquals(
+             byteArrayOf(
+                 0,
+                 0,
+                 KeyboardKey.KEY_CAPS_LOCK.byte,
+-                0,
++                KeyboardKey.ROW_3_KEY_00.byte,
+                 0,
+                 0,
+                 0,
+@@ -97,42 +85,56 @@ class KeyboardReportStateTest {
+             ),
+             reports[0]
+         )
+-        assertArrayEquals(ByteArray(8), reports[1])
+-        assertTrue(state.isCapsLockOn)
++        assertArrayEquals(
++            byteArrayOf(0, 0, KeyboardKey.ROW_3_KEY_00.byte, 0, 0, 0, 0, 0),
++            reports[1]
++        )
++        // The key is still held afterwards.
++        assertArrayEquals(
++            byteArrayOf(0, 0, KeyboardKey.ROW_3_KEY_00.byte, 0, 0, 0, 0, 0),
++            state.report
++        )
+     }
+ 
+     @Test
+-    fun togglingCapsWhileAKeyIsHeldKeepsTheKeyDown() {
++    fun capsLockStateIsNeverLatchedLocally() {
+         val state = KeyboardReportState()
+-        state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
+ 
+-        val reports = state.toggleCapsLock()
++        state.capsLockTap()
+ 
++        // No Shift is injected on later reports: the host owns Caps Lock.
+         assertArrayEquals(
+-            byteArrayOf(
+-                KeyboardKey.KEY_SHIFT_LEFT.byte,
+-                0,
+-                KeyboardKey.ROW_3_KEY_00.byte,
+-                KeyboardKey.KEY_CAPS_LOCK.byte,
+-                0,
+-                0,
+-                0,
+-                0
+-            ),
+-            reports[0]
++            byteArrayOf(0, 0, KeyboardKey.ROW_3_KEY_00.byte, 0, 0, 0, 0, 0),
++            state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
+         )
++        state.releaseKey(KeyboardKey.ROW_3_KEY_00.byte)
++        assertArrayEquals(
++            byteArrayOf(0, 0, KeyboardKey.ROW_1_KEY_01.byte, 0, 0, 0, 0, 0),
++            state.pressKey(KeyboardKey.ROW_1_KEY_01.byte)
++        )
++    }
++
++    @Test
++    fun aHeldCommandShortcutStaysFreeOfCapsShift() {
++        val state = KeyboardReportState()
++        state.pressModifier(KeyboardKey.KEY_META_LEFT.byte)
++        state.pressKey(KeyboardKey.ROW_4_KEY_01.byte)
++
++        state.capsLockTap()
++
++        // Cmd+Z must not become Cmd+Shift+Z after a Caps tap.
+         assertArrayEquals(
+             byteArrayOf(
+-                KeyboardKey.KEY_SHIFT_LEFT.byte,
++                KeyboardKey.KEY_META_LEFT.byte,
+                 0,
+-                KeyboardKey.ROW_3_KEY_00.byte,
++                KeyboardKey.ROW_4_KEY_01.byte,
+                 0,
+                 0,
+                 0,
+                 0,
+                 0
+             ),
+-            reports[1]
++            state.report
+         )
+     }
+ 
+@@ -187,26 +189,37 @@ class KeyboardReportStateTest {
+     }
+ 
+     @Test
+-    fun clearReleasesKeysAndModifiersButKeepsTheCapsLatch() {
++    fun clearReleasesKeysAndModifiersAndLeavesNoShiftBehind() {
+         val state = KeyboardReportState()
+         state.pressModifier(KeyboardKey.KEY_SHIFT_LEFT.byte)
+         state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
+-        state.toggleCapsLock()
++        state.capsLockTap()
+ 
+         assertArrayEquals(ByteArray(8), state.clear())
+-        assertTrue(state.isCapsLockOn)
++
+         assertArrayEquals(
+-            byteArrayOf(
+-                KeyboardKey.KEY_SHIFT_LEFT.byte,
+-                0,
+-                KeyboardKey.ROW_3_KEY_00.byte,
+-                0,
+-                0,
+-                0,
+-                0,
+-                0
+-            ),
++            byteArrayOf(0, 0, KeyboardKey.ROW_3_KEY_00.byte, 0, 0, 0, 0, 0),
+             state.pressKey(KeyboardKey.ROW_3_KEY_00.byte)
+         )
+     }
++
++    @Test
++    fun capsTapIsNotDroppedWhenSixKeysAreAlreadyHeld() {
++        val state = KeyboardReportState()
++        val held = listOf(
++            KeyboardKey.ROW_3_KEY_00.byte,
++            KeyboardKey.ROW_3_KEY_01.byte,
++            KeyboardKey.ROW_3_KEY_02.byte,
++            KeyboardKey.ROW_3_KEY_03.byte,
++            KeyboardKey.ROW_3_KEY_04.byte,
++            KeyboardKey.ROW_3_KEY_05.byte
++        )
++        held.forEach { state.pressKey(it) }
++
++        val reports = state.capsLockTap()
++
++        assertEquals(8, reports[0].size)
++        assertTrue(reports[0].contains(KeyboardKey.KEY_CAPS_LOCK.byte))
++        assertFalse(reports[1].contains(KeyboardKey.KEY_CAPS_LOCK.byte))
++    }
+ }
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/KeyboardGridMetricsTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/KeyboardGridMetricsTest.kt
+new file mode 100644
+index 0000000..8acd4ef
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/KeyboardGridMetricsTest.kt
+@@ -0,0 +1,89 @@
++package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class KeyboardGridMetricsTest {
++
++    private val width = 1450f
++    private val gap = 4f
++
++    @Test
++    fun unitWidthDividesTheGridIntoFourteenAndAHalfColumns() {
++        assertEquals(100f, KeyboardGridMetrics.unitWidth(width), 0.001f)
++        assertEquals(0f, KeyboardGridMetrics.unitWidth(0f), 0.001f)
++        assertEquals(0f, KeyboardGridMetrics.unitWidth(-10f), 0.001f)
++    }
++
++    @Test
++    fun everyOneUnitKeyIsTheSameWidthRegardlessOfRowKeyCount() {
++        val oneUnit = KeyboardGridMetrics.slotWidth(1f, width, gap)
++
++        assertEquals(96f, oneUnit, 0.001f)
++
++        // Dividing the remaining width per row instead would give the 14-key
++        // number row a different 1u width than the 12-key shift row, which is
++        // exactly the misalignment the shared unit grid removes.
++        val denseRowWidth = (width - 13 * gap) / 14f
++        val sparseRowWidth = (width - 11 * gap) / 12f
++        assertEquals(99.857f, denseRowWidth, 0.01f)
++        assertEquals(117.167f, sparseRowWidth, 0.01f)
++        assertTrue(oneUnit < denseRowWidth)
++    }
++
++    @Test
++    fun oneUnitKeysKeepTheSamePitchAcrossTheGrid() {
++        val first = KeyboardGridMetrics.slotStartX(0f, width, gap)
++        val second = KeyboardGridMetrics.slotStartX(1f, width, gap)
++        val eighth = KeyboardGridMetrics.slotStartX(7f, width, gap)
++
++        assertEquals(2f, first, 0.001f)
++        assertEquals(102f, second, 0.001f)
++        assertEquals(702f, eighth, 0.001f)
++        assertEquals(100f, second - first, 0.001f)
++        assertEquals(600f, eighth - second, 0.001f)
++    }
++
++    @Test
++    fun aWideKeyStartsAfterItsOwnSlotAndKeepsHalfAGapOnBothSides() {
++        val tab = KeyboardGridMetrics.slotWidth(1.5f, width, gap)
++
++        assertEquals(146f, tab, 0.001f)
++        assertEquals(2f, KeyboardGridMetrics.slotStartX(0f, width, gap), 0.001f)
++        // last key of the row ends half a gap before the right edge
++        val lastStart = KeyboardGridMetrics.slotStartX(13.5f, width, gap)
++        val lastWidth = KeyboardGridMetrics.slotWidth(1f, width, gap)
++        assertEquals(width - gap / 2f, lastStart + lastWidth, 0.001f)
++    }
++
++    @Test
++    fun aSlotNeverHasANegativeWidth() {
++        assertEquals(0f, KeyboardGridMetrics.slotWidth(0.1f, 10f, 100f), 0.001f)
++    }
++
++    @Test
++    fun stackedCellSplitsIntoTwoTouchBandsThatMeetInTheMiddle() {
++        assertEquals(50f, StackedKeyCellGeometry.touchHeight(100f), 0.001f)
++
++        val inset = StackedKeyCellGeometry.capInset(cellHeight = 100f, gap = 4f)
++        val capHeight = StackedKeyCellGeometry.capHeight(cellHeight = 100f, gap = 4f)
++
++        assertEquals(2f, inset, 0.001f)
++        assertEquals(48f, capHeight, 0.001f)
++
++        // Top cap ends at 48, bottom cap starts at 52: the 4dp row gap is drawn.
++        val topCapBottom = capHeight
++        val bottomCapTop = 100f - capHeight
++        assertEquals(4f, bottomCapTop - topCapBottom, 0.001f)
++
++        // The touch bands still cover the whole cell with no dead strip.
++        assertEquals(100f, StackedKeyCellGeometry.touchHeight(100f) * 2f, 0.001f)
++    }
++
++    @Test
++    fun anInsetNeverEatsMoreThanHalfTheCell() {
++        assertEquals(10f, StackedKeyCellGeometry.capInset(cellHeight = 20f, gap = 40f), 0.001f)
++        assertEquals(0f, StackedKeyCellGeometry.capHeight(cellHeight = 20f, gap = 40f), 0.001f)
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
+index ec0422f..ad99cba 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
+@@ -4,6 +4,7 @@ import android.content.ContextWrapper
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.EnglishUSAdvancedKeyboardLayout
+ import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotNull
+ import org.junit.Assert.assertTrue
+ import org.junit.Test
+ 
+@@ -14,19 +15,43 @@ class MacKeyboardLayoutFactoryTest {
+     private val layout = MacKeyboardLayoutFactory.build(EnglishUSAdvancedKeyboardLayout(context))
+ 
+     @Test
+-    fun buildsSixRowsWithFifteenUnitsEach() {
++    fun buildsSixRowsOfFourteenAndAHalfUnits() {
+         assertEquals(6, layout.rows.size)
+         layout.rows.forEachIndexed { index, row ->
+-            assertEquals("row $index", 15f, row.totalWeight, 0.001f)
++            assertEquals("row $index", 14.5f, row.totalWeight, 0.001f)
+         }
+     }
+ 
+     @Test
+-    fun numberRowStartsAtGraveAndEndsWithBackspace() {
++    fun everyRowKeepsTheExactMacBookWidths() {
++        val rows = layout.rows
++
++        assertEquals(
++            listOf(1.5f) + List(12) { 13f / 12f },
++            rows[0].keys.map { it.weight }
++        )
++        assertEquals(1f, rows[1].keys.first().weight, 0.001f)
++        assertEquals(1.5f, rows[1].keys.last().weight, 0.001f)
++        assertTrue(rows[1].keys.drop(1).dropLast(1).all { it.weight == 1f })
++        assertEquals(1.5f, rows[2].keys.first().weight, 0.001f)
++        assertEquals(1f, rows[2].keys.last().weight, 0.001f)
++        assertEquals(1.75f, rows[3].keys.first().weight, 0.001f)
++        assertEquals(1.75f, rows[3].keys.last().weight, 0.001f)
++        assertEquals(2.25f, rows[4].keys.first().weight, 0.001f)
++        assertEquals(2.25f, rows[4].keys.last().weight, 0.001f)
++        assertEquals(
++            listOf(1f, 1f, 1.25f, 6f, 1.25f, 1f, 1f, 1f, 1f),
++            rows[5].keys.map { it.weight }
++        )
++    }
++
++    @Test
++    fun numberRowStartsAtGraveAndEndsWithABackspaceOfOneAndAHalfUnits() {
+         val row = layout.rows[1]
+ 
+         assertEquals(KeyboardKey.ROW_1_KEY_00.byte, row.keys.first().byte)
+         assertEquals(KeyboardKey.KEY_DELETE.byte, row.keys.last().byte)
++        assertEquals(1.5f, row.keys.last().weight, 0.001f)
+         assertEquals(14, row.keys.size)
+     }
+ 
+@@ -36,7 +61,8 @@ class MacKeyboardLayoutFactoryTest {
+ 
+         assertEquals(KeyboardKey.KEY_TAB.byte, row.keys.first().byte)
+         assertEquals(KeyboardKey.ROW_3_KEY_11.byte, row.keys.last().byte)
+-        assertEquals(MacKeyboardKeyWeight.ROW_BACKSLASH, row.keys.last().weight, 0.001f)
++        assertEquals(1f, row.keys.last().weight, 0.001f)
++        assertEquals(14, row.keys.size)
+     }
+ 
+     @Test
+@@ -45,18 +71,22 @@ class MacKeyboardLayoutFactoryTest {
+ 
+         assertEquals(KeyboardKey.KEY_CAPS_LOCK.byte, row.keys.first().byte)
+         assertEquals(KeyboardKey.KEY_ENTER.byte, row.keys.last().byte)
+-        assertEquals(MacKeyboardKeyWeight.CAPS_LOCK, row.keys.first().weight, 0.001f)
+-        assertEquals(MacKeyboardKeyWeight.ENTER, row.keys.last().weight, 0.001f)
++        assertEquals(1.75f, row.keys.first().weight, 0.001f)
++        assertEquals(1.75f, row.keys.last().weight, 0.001f)
++        assertEquals(13, row.keys.size)
+     }
+ 
+     @Test
+-    fun shiftRowHasNoIsoExtraKey() {
++    fun shiftRowHasNoIsoExtraKeyAndNoArrow() {
+         val row = layout.rows[4]
+ 
+         assertEquals(KeyboardKey.KEY_SHIFT_LEFT.byte, row.keys.first().byte)
+         assertTrue(row.keys.none { it.byte == KeyboardKey.ROW_4_KEY_00.byte })
+-        assertEquals(KeyboardKey.KEY_UP_ARROW.byte, row.keys[row.keys.size - 2].byte)
++        assertTrue(row.keys.none { it.byte == KeyboardKey.KEY_UP_ARROW.byte })
+         assertEquals(KeyboardKey.KEY_SHIFT_RIGHT.byte, row.keys.last().byte)
++        assertEquals(2.25f, row.keys.first().weight, 0.001f)
++        assertEquals(2.25f, row.keys.last().weight, 0.001f)
++        assertEquals(12, row.keys.size)
+     }
+ 
+     @Test
+@@ -72,7 +102,7 @@ class MacKeyboardLayoutFactoryTest {
+     }
+ 
+     @Test
+-    fun bottomRowMatchesTheMacModifierOrder() {
++    fun bottomRowMatchesTheMacBookOrder() {
+         val row = layout.rows[5]
+ 
+         assertEquals(
+@@ -84,13 +114,24 @@ class MacKeyboardLayoutFactoryTest {
+                 KeyboardKey.KEY_META_RIGHT.byte,
+                 KeyboardKey.KEY_ALT_GR.byte,
+                 KeyboardKey.KEY_LEFT_ARROW.byte,
+-                KeyboardKey.KEY_DOWN_ARROW.byte,
++                KeyboardKey.KEY_UP_ARROW.byte,
+                 KeyboardKey.KEY_RIGHT_ARROW.byte
+             ),
+             row.keys.map { it.byte }
+         )
+     }
+ 
++    @Test
++    fun upAndDownShareTheSameOneUnitColumn() {
++        val cell = layout.rows[5].keys[7]
++
++        assertEquals(KeyboardKey.KEY_UP_ARROW.byte, cell.byte)
++        assertEquals(1f, cell.weight, 0.001f)
++        assertNotNull(cell.stackedBelow)
++        assertEquals(KeyboardKey.KEY_DOWN_ARROW.byte, cell.stackedBelow?.byte)
++        assertEquals(1f, cell.stackedBelow?.weight ?: 0f, 0.001f)
++    }
++
+     @Test
+     fun onlyAnsiUsagesRemain() {
+         val bytes = layout.keys.map { it.byte }.toSet()
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt
+index 0d07ad9..d4d2dce 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt
+@@ -4,6 +4,8 @@ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.TextAdvancedKeyboardKey
+ import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotNull
++import org.junit.Assert.assertNull
+ import org.junit.Assert.assertTrue
+ import org.junit.Test
+ 
+@@ -73,58 +75,40 @@ class MacKeyboardLayoutTest {
+     }
+ 
+     @Test
+-    fun keyExposesUsageByteWeightKindAndBehavior() {
+-        val modifier = key(
+-            byte = KeyboardKey.KEY_CTRL_LEFT.byte,
+-            weight = 1.25f,
+-            kind = MacKeyboardKeyKind.MODIFIER,
+-            behavior = AdvancedKeyBehavior.MODIFIER
++    fun stackedCellCountsOnceInTheRowTotalButExposesBothCaps() {
++        val upper = key(KeyboardKey.KEY_UP_ARROW.byte)
++        val lower = key(KeyboardKey.KEY_DOWN_ARROW.byte)
++        val row = MacKeyboardRow(
++            listOf(
++                key(KeyboardKey.KEY_META_LEFT.byte),
++                upper.copy(stackedBelow = lower)
++            )
+         )
+ 
+-        assertEquals(KeyboardKey.KEY_CTRL_LEFT.byte, modifier.byte)
+-        assertEquals(1.25f, modifier.weight, 0.001f)
+-        assertEquals(MacKeyboardKeyKind.MODIFIER, modifier.kind)
+-        assertEquals(AdvancedKeyBehavior.MODIFIER, modifier.behavior)
+-    }
+-
+-    @Test
+-    fun functionRowIsEscAndF1ToF12() {
+-        val row = MacKeyboardSpec.functionRow
+-
++        assertEquals(2f, row.totalWeight, 0.001f)
+         assertEquals(
+-            listOf(
+-                KeyboardKey.KEY_ESCAPE.byte,
+-                KeyboardKey.KEY_F1.byte,
+-                KeyboardKey.KEY_F2.byte,
+-                KeyboardKey.KEY_F3.byte,
+-                KeyboardKey.KEY_F4.byte,
+-                KeyboardKey.KEY_F5.byte,
+-                KeyboardKey.KEY_F6.byte,
+-                KeyboardKey.KEY_F7.byte,
+-                KeyboardKey.KEY_F8.byte,
+-                KeyboardKey.KEY_F9.byte,
+-                KeyboardKey.KEY_F10.byte,
+-                KeyboardKey.KEY_F11.byte,
+-                KeyboardKey.KEY_F12.byte
+-            ),
+-            row.keys.map { it.byte }
++            listOf(KeyboardKey.KEY_META_LEFT.byte, upper.byte, lower.byte),
++            row.caps.map { it.byte }
+         )
+-        assertEquals(13, row.keys.size)
+-        assertEquals(15f, row.totalWeight, 0.001f)
+-        assertEquals(1.5f, row.keys.first().weight, 0.001f)
+-        assertTrue(row.keys.drop(1).all { it.weight == 1.125f })
++        assertEquals(lower.byte, row.keys[1].stackedBelow?.byte)
+     }
+ 
+     @Test
+-    fun functionRowHasNoPrintScreenOrForwardDelete() {
++    fun functionRowIsEscAndTwelveKeysOnTheFourteenAndAHalfGrid() {
+         val row = MacKeyboardSpec.functionRow
+ 
++        assertEquals(13, row.keys.size)
++        assertEquals(KeyboardKey.KEY_ESCAPE.byte, row.keys.first().byte)
++        assertEquals(MacKeyboardKeyWeight.ESCAPE, row.keys.first().weight, 0.001f)
++        assertTrue(row.keys.drop(1).all { it.weight == MacKeyboardKeyWeight.FUNCTION })
++        assertEquals(14.5f, row.totalWeight, 0.001f)
++        assertEquals(13f / 12f, MacKeyboardKeyWeight.FUNCTION, 0.001f)
+         assertTrue(row.keys.none { it.byte == KeyboardKey.KEY_PRINT_SCREEN.byte })
+         assertTrue(row.keys.none { it.byte == KeyboardKey.KEY_DELETE_FORWARD.byte })
+     }
+ 
+     @Test
+-    fun functionRowAndEscapeStayOrdinaryKeys() {
++    fun functionKeysAreOrdinaryCaps() {
+         val row = MacKeyboardSpec.functionRow
+ 
+         assertTrue(row.keys.all { it.behavior == AdvancedKeyBehavior.KEY })
+@@ -132,7 +116,17 @@ class MacKeyboardLayoutTest {
+     }
+ 
+     @Test
+-    fun bottomRowIsTheFixedModifierRow() {
++    fun bottomRowCarriesTheStackedUpDownColumnInsteadOfTwoSeparateKeys() {
++        val row = MacKeyboardSpec.bottomRow
++
++        val arrows = row.keys.filter { it.stackedBelow != null }
++        assertEquals(1, arrows.size)
++        assertEquals(KeyboardKey.KEY_UP_ARROW.byte, arrows.single().byte)
++        assertEquals(KeyboardKey.KEY_DOWN_ARROW.byte, arrows.single().stackedBelow?.byte)
++    }
++
++    @Test
++    fun bottomRowIsTheMacBookModifierRow() {
+         val row = MacKeyboardSpec.bottomRow
+ 
+         assertEquals(
+@@ -144,16 +138,16 @@ class MacKeyboardLayoutTest {
+                 KeyboardKey.KEY_META_RIGHT.byte,
+                 KeyboardKey.KEY_ALT_GR.byte,
+                 KeyboardKey.KEY_LEFT_ARROW.byte,
+-                KeyboardKey.KEY_DOWN_ARROW.byte,
++                KeyboardKey.KEY_UP_ARROW.byte,
+                 KeyboardKey.KEY_RIGHT_ARROW.byte
+             ),
+             row.keys.map { it.byte }
+         )
+         assertEquals(
+-            listOf(1.25f, 1.25f, 1.25f, 5f, 1.25f, 1.25f, 1f, 1f, 1.75f),
++            listOf(1f, 1f, 1.25f, 6f, 1.25f, 1f, 1f, 1f, 1f),
+             row.keys.map { it.weight }
+         )
+-        assertEquals(15f, row.totalWeight, 0.001f)
++        assertEquals(14.5f, row.totalWeight, 0.001f)
+     }
+ 
+     @Test
+@@ -175,4 +169,35 @@ class MacKeyboardLayoutTest {
+             row.keys.filter { it.kind == MacKeyboardKeyKind.ORDINARY }.map { it.behavior }
+         )
+     }
++
++    @Test
++    fun upAndDownShareOneUnitColumn() {
++        val cell = MacKeyboardSpec.upDownColumn
++
++        assertEquals(MacKeyboardKeyWeight.ARROW, cell.weight, 0.001f)
++        assertNotNull(cell.stackedBelow)
++        assertEquals(KeyboardKey.KEY_DOWN_ARROW.byte, cell.stackedBelow?.byte)
++        assertEquals(MacKeyboardKeyWeight.ARROW, cell.stackedBelow?.weight ?: 0f, 0.001f)
++    }
++
++    @Test
++    fun leftAndRightArrowsHaveTheSameWidth() {
++        assertEquals(MacKeyboardSpec.leftArrow.weight, MacKeyboardSpec.rightArrow.weight, 0.001f)
++        assertEquals(1f, MacKeyboardSpec.rightArrow.weight, 0.001f)
++    }
++
++    @Test
++    fun functionRowStartsWithEscapeThenF1() {
++        val row = MacKeyboardSpec.functionRow
++
++        assertEquals(KeyboardKey.KEY_ESCAPE.byte, row.keys[0].byte)
++        assertEquals(KeyboardKey.KEY_F1.byte, row.keys[1].byte)
++        assertEquals(MacKeyboardKeyWeight.ESCAPE, row.keys[0].weight, 0.001f)
++    }
++
++    @Test
++    fun plainCapsHaveNoStackedHalf() {
++        assertNull(MacKeyboardSpec.space.stackedBelow)
++        assertNull(MacKeyboardSpec.leftArrow.stackedBelow)
++    }
+ }
+-- 
+2.49.0
+

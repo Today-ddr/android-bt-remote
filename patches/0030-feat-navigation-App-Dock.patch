@@ -1,0 +1,381 @@
+From 4063b42239836849af97d6b1650f6d8c4950a586 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 01:10:49 +0800
+Subject: [PATCH 30/33] =?UTF-8?q?feat(navigation):=20=E5=A2=9E=E5=8A=A0?=
+ =?UTF-8?q?=E7=AB=96=E5=B1=8F=20App=20Dock?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 新增胶囊 Dock，连接/输入/设置三项高亮当前页并适配底部系统 inset
+- AppScaffold 支持可选 bottomBar，仅设备页与设置页竖屏显示
+- Dock 导航复用已有目的地并回退到已有页面，避免重复堆栈
+- 输入页保持横屏独立工具栏，不显示 Dock
+---
+ .../atharok/btremote/ui/components/AppDock.kt | 134 ++++++++++++++++++
+ .../btremote/ui/components/Scaffold.kt        |   4 +
+ .../btremote/ui/navigation/AppNavHost.kt      |  16 +++
+ .../ui/navigation/DockVisibilityPolicy.kt     |  24 ++++
+ .../ui/screens/DevicesSelectionScreen.kt      |   8 +-
+ .../btremote/ui/screens/SettingsScreen.kt     |   4 +-
+ .../ui/navigation/DockVisibilityPolicyTest.kt |  56 ++++++++
+ 7 files changed, 243 insertions(+), 3 deletions(-)
+ create mode 100644 app/src/main/java/com/atharok/btremote/ui/components/AppDock.kt
+ create mode 100644 app/src/main/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicy.kt
+ create mode 100644 app/src/test/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicyTest.kt
+
+diff --git a/app/src/main/java/com/atharok/btremote/ui/components/AppDock.kt b/app/src/main/java/com/atharok/btremote/ui/components/AppDock.kt
+new file mode 100644
+index 0000000..72873f4
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/ui/components/AppDock.kt
+@@ -0,0 +1,134 @@
++package com.atharok.btremote.ui.components
++
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.WindowInsets
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.navigationBars
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.widthIn
++import androidx.compose.foundation.layout.windowInsetsPadding
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.Icon
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Surface
++import androidx.compose.material3.Text
++import androidx.compose.material3.surfaceColorAtElevation
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.vector.ImageVector
++import androidx.compose.ui.hapticfeedback.HapticFeedbackType
++import androidx.compose.ui.platform.LocalHapticFeedback
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.res.dimensionResource
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import com.atharok.btremote.R
++import com.atharok.btremote.common.utils.AppIcons
++import com.atharok.btremote.ui.navigation.AppMainTab
++import com.atharok.btremote.ui.theme.surfaceElevationLow
++
++/**
++ * The portrait navigation capsule modelled on the iOS AppDock: one entry per
++ * root page, the current one highlighted, and the whole bar inset from the
++ * screen edges.
++ *
++ * It is used as a Scaffold bottom bar, so it never covers the page content.
++ */
++@Composable
++fun AppDock(
++    selectedTab: AppMainTab,
++    onSelectTab: (AppMainTab) -> Unit,
++    modifier: Modifier = Modifier
++) {
++    val hapticFeedback = LocalHapticFeedback.current
++
++    Box(
++        modifier = modifier
++            .fillMaxWidth()
++            .windowInsetsPadding(WindowInsets.navigationBars)
++            .padding(horizontal = 12.dp, vertical = 4.dp),
++        contentAlignment = Alignment.Center
++    ) {
++        Surface(
++            shape = RoundedCornerShape(percent = 50),
++            color = MaterialTheme.colorScheme.surfaceColorAtElevation(surfaceElevationLow()),
++            tonalElevation = surfaceElevationLow()
++        ) {
++            Row(
++                modifier = Modifier
++                    .widthIn(max = 520.dp)
++                    .padding(5.dp),
++                horizontalArrangement = Arrangement.spacedBy(4.dp)
++            ) {
++                AppMainTab.entries.forEach { tab ->
++                    DockItem(
++                        tab = tab,
++                        selected = tab == selectedTab,
++                        onClick = {
++                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
++                            onSelectTab(tab)
++                        },
++                        modifier = Modifier.weight(1f)
++                    )
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun DockItem(
++    tab: AppMainTab,
++    selected: Boolean,
++    onClick: () -> Unit,
++    modifier: Modifier = Modifier
++) {
++    val accent = MaterialTheme.colorScheme.primary
++    Column(
++        modifier = modifier
++            .clip(RoundedCornerShape(dimensionResource(id = R.dimen.card_corner_radius)))
++            .background(if (selected) accent.copy(alpha = 0.16f) else Color.Transparent)
++            .clickable(onClick = onClick)
++            .padding(vertical = 6.dp),
++        horizontalAlignment = Alignment.CenterHorizontally,
++        verticalArrangement = Arrangement.spacedBy(3.dp)
++    ) {
++        Icon(
++            imageVector = tab.icon(),
++            contentDescription = null,
++            modifier = Modifier.size(20.dp),
++            tint = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant
++        )
++        Text(
++            text = stringResource(id = tab.labelRes()),
++            fontSize = 10.sp,
++            fontWeight = FontWeight.SemiBold,
++            color = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant,
++            maxLines = 1,
++            overflow = TextOverflow.Ellipsis
++        )
++    }
++}
++
++private fun AppMainTab.icon(): ImageVector = when (this) {
++    AppMainTab.CONNECT -> AppIcons.Bluetooth
++    AppMainTab.INPUT -> AppIcons.Input
++    AppMainTab.SETTINGS -> AppIcons.Settings
++}
++
++private fun AppMainTab.labelRes(): Int = when (this) {
++    AppMainTab.CONNECT -> R.string.connection
++    AppMainTab.INPUT -> R.string.input
++    AppMainTab.SETTINGS -> R.string.settings
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/components/Scaffold.kt b/app/src/main/java/com/atharok/btremote/ui/components/Scaffold.kt
+index 1b53a1b..b3fd81c 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/components/Scaffold.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/components/Scaffold.kt
+@@ -17,6 +17,7 @@ fun AppScaffold(
+     modifier: Modifier = Modifier,
+     navigateUp: @Composable () -> Unit = {},
+     topBarActions: @Composable RowScope.() -> Unit = {},
++    bottomBar: @Composable () -> Unit = {},
+     snackbarHost: @Composable () -> Unit = {},
+     content: @Composable (PaddingValues) -> Unit
+ ) {
+@@ -27,6 +28,7 @@ fun AppScaffold(
+         scrollBehavior = scrollBehavior,
+         navigateUp = navigateUp,
+         topBarActions = topBarActions,
++        bottomBar = bottomBar,
+         snackbarHost = snackbarHost,
+         content = content
+     )
+@@ -40,6 +42,7 @@ fun AppScaffold(
+     scrollBehavior: TopAppBarScrollBehavior? = null,
+     navigateUp: @Composable () -> Unit = {},
+     topBarActions: @Composable RowScope.() -> Unit = {},
++    bottomBar: @Composable () -> Unit = {},
+     snackbarHost: @Composable () -> Unit = {},
+     content: @Composable (PaddingValues) -> Unit
+ ) {
+@@ -53,6 +56,7 @@ fun AppScaffold(
+                 scrollBehavior = scrollBehavior
+             )
+         },
++        bottomBar = bottomBar,
+         snackbarHost = snackbarHost
+     ) { innerPadding ->
+         content(innerPadding)
+diff --git a/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavHost.kt b/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavHost.kt
+index 9509574..7656dd8 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavHost.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/navigation/AppNavHost.kt
+@@ -157,3 +157,19 @@ fun NavHostController.navigateTo(
+         this.launchSingleTop = launchSingleTop
+     }
+ }
++
++/**
++ * Moves to a dock page by reusing the copy already on the back stack.
++ *
++ * Popping to an existing entry keeps the stack from growing a second Settings
++ * or a second device page when the dock is used repeatedly. When the page is
++ * not on the stack, a normal navigation pushes it.
++ */
++fun NavHostController.navigateToMainTab(tab: AppMainTab) {
++    if (currentDestination?.route == tab.route) {
++        return
++    }
++    if (!popBackStack(tab.route, inclusive = false)) {
++        navigateTo(tab.route)
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicy.kt b/app/src/main/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicy.kt
+new file mode 100644
+index 0000000..1bf8e07
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicy.kt
+@@ -0,0 +1,24 @@
++package com.atharok.btremote.ui.navigation
++
++/** The three root entries of the dock. */
++enum class AppMainTab(val route: String) {
++    CONNECT(AppNavDestination.DeviceSelectionDestination.route),
++    INPUT(AppNavDestination.InputDestination.route),
++    SETTINGS(AppNavDestination.SettingsDestination.route)
++}
++
++/**
++ * The dock is the portrait navigation for the two main pages.
++ *
++ * The input page is landscape-only and draws its own toolbar, and the
++ * permission, activation, discovery, pairing and settings sub-pages are
++ * one-way flows that keep their own back navigation.
++ */
++object DockVisibilityPolicy {
++
++    fun showsDock(isLandscape: Boolean, route: String?): Boolean {
++        if (isLandscape) return false
++        return route == AppNavDestination.DeviceSelectionDestination.route ||
++            route == AppNavDestination.SettingsDestination.route
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt b/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt
+index ce71590..b0a1065 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/screens/DevicesSelectionScreen.kt
+@@ -82,6 +82,7 @@ fun DevicesSelectionScreen(
+     disconnectCompletely: () -> Unit,
+     startHidService: (String?) -> Unit,
+     modifier: Modifier = Modifier,
++    bottomBar: @Composable () -> Unit = {},
+     viewModel: DeviceSelectionViewModel = koinViewModel(),
+     context: Context = LocalContext.current
+ ) {
+@@ -235,7 +236,8 @@ fun DevicesSelectionScreen(
+             }
+         },
+ 
+-        modifier = modifier
++        modifier = modifier,
++        bottomBar = bottomBar
+     )
+ }
+ 
+@@ -256,12 +258,14 @@ private fun StatelessDevicesSelectionScreen(
+     topBarActions: @Composable (RowScope.() -> Unit),
+     overlayView: @Composable () -> Unit,
+ 
+-    modifier: Modifier = Modifier
++    modifier: Modifier = Modifier,
++    bottomBar: @Composable () -> Unit = {}
+ ) {
+     AppScaffold(
+         title = stringResource(id = R.string.devices),
+         modifier = modifier,
+         topBarActions = topBarActions,
++        bottomBar = bottomBar,
+         snackbarHost = {
+             SnackbarHost(hostState = snackbarHostState)
+         }
+diff --git a/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt b/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt
+index 5cf3ace..210202d 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/screens/SettingsScreen.kt
+@@ -63,6 +63,7 @@ fun SettingsScreen(
+     navigateToThirdLibrariesScreen: () -> Unit,
+     navigateToTrackpadGestureSettingsScreen: () -> Unit,
+     modifier: Modifier = Modifier,
++    bottomBar: @Composable () -> Unit = {},
+     settingsViewModel: SettingsViewModel = koinViewModel(),
+     context: Context = LocalContext.current,
+     uriHandler: UriHandler = LocalUriHandler.current
+@@ -85,7 +86,8 @@ fun SettingsScreen(
+         modifier = modifier,
+         navigateUp = {
+             NavigateUpIconButton(navigateUp)
+-        }
++        },
++        bottomBar = bottomBar
+     ) { innerPadding ->
+ 
+         val horizontalPadding = dimensionResource(id = R.dimen.padding_max)
+diff --git a/app/src/test/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicyTest.kt b/app/src/test/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicyTest.kt
+new file mode 100644
+index 0000000..e697de6
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicyTest.kt
+@@ -0,0 +1,56 @@
++package com.atharok.btremote.ui.navigation
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class DockVisibilityPolicyTest {
++
++    private val devices = AppNavDestination.DeviceSelectionDestination.route
++    private val settings = AppNavDestination.SettingsDestination.route
++    private val input = AppNavDestination.InputDestination.route
++
++    @Test
++    fun dockShowsOnTheTwoMainPortraitPages() {
++        assertTrue(DockVisibilityPolicy.showsDock(isLandscape = false, route = devices))
++        assertTrue(DockVisibilityPolicy.showsDock(isLandscape = false, route = settings))
++    }
++
++    @Test
++    fun dockHidesOnTheInputPageLandscapeOrNot() {
++        assertFalse(DockVisibilityPolicy.showsDock(isLandscape = true, route = input))
++        assertFalse(DockVisibilityPolicy.showsDock(isLandscape = false, route = input))
++    }
++
++    @Test
++    fun dockHidesOnPermissionActivationDiscoveryAndSettingsSubPages() {
++        val hiddenRoutes = listOf(
++            AppNavDestination.BluetoothPermissionsDestination.route,
++            AppNavDestination.BluetoothActivationDestination.route,
++            AppNavDestination.DeviceDiscoveryDestination.route,
++            AppNavDestination.DistantDevicePairDestination.route,
++            AppNavDestination.TrackpadGestureSettingsDestination.route,
++            AppNavDestination.ThirdLibrariesDestination.route,
++            null
++        )
++
++        hiddenRoutes.forEach { route ->
++            assertFalse("$route", DockVisibilityPolicy.showsDock(isLandscape = false, route = route))
++        }
++    }
++
++    @Test
++    fun dockHidesInLandscapeEvenOnAMainPage() {
++        assertFalse(DockVisibilityPolicy.showsDock(isLandscape = true, route = devices))
++        assertFalse(DockVisibilityPolicy.showsDock(isLandscape = true, route = settings))
++    }
++
++    @Test
++    fun dockTabsPointAtTheThreeRootDestinations() {
++        assertEquals(devices, AppMainTab.CONNECT.route)
++        assertEquals(input, AppMainTab.INPUT.route)
++        assertEquals(settings, AppMainTab.SETTINGS.route)
++        assertEquals(3, AppMainTab.entries.size)
++    }
++}
+-- 
+2.49.0
+

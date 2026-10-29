@@ -1,0 +1,939 @@
+From 8f1ded1629cca76d07e8c75e3aa5a3e20b0e6344 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 01:10:44 +0800
+Subject: [PATCH 29/33] =?UTF-8?q?fix(trackpad):=20=E5=AF=B9=E9=BD=90?=
+ =?UTF-8?q?=E6=8C=89=E9=92=AE=E5=90=88=E5=B9=B6=E4=B8=8E=E6=89=8B=E5=8A=BF?=
+ =?UTF-8?q?=E9=87=8A=E6=94=BE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 新增 MouseButtons 位集，拖动、点击与滚动共用同一 held 集合
+- 右侧滚动列固定 46dp，三个按钮圆角等权并保留间距与 wheel 报告
+- 页切换、断线、后台与销毁发送完整零鼠标报告并释放拖拽
+- 关闭长按拖拽时慢点击仍生效，保留 3/4 指手势与旋转单次触发
+---
+ .../entities/remoteInput/MouseButtons.kt      |  79 ++++++++++
+ .../trackpad/TrackpadGestureCommandMapper.kt  |  40 ++---
+ .../trackpad/TrackpadGestureRecognizer.kt     |  52 +++----
+ .../presentation/viewmodel/RemoteViewModel.kt |   6 +-
+ .../btremote/ui/views/mouse/MacTrackpad.kt    |  32 +---
+ .../btremote/ui/views/mouse/TrackpadPage.kt   | 142 ++++++++++++++----
+ .../remoteInput/MouseButtonStateTest.kt       |  96 ++++++++++++
+ .../TrackpadGestureCommandMapperTest.kt       |  37 ++---
+ .../trackpad/TrackpadLongPressTest.kt         |  21 +++
+ 9 files changed, 365 insertions(+), 140 deletions(-)
+ create mode 100644 app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/MouseButtons.kt
+ create mode 100644 app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/MouseButtonStateTest.kt
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/MouseButtons.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/MouseButtons.kt
+new file mode 100644
+index 0000000..70382a9
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/MouseButtons.kt
+@@ -0,0 +1,79 @@
++package com.atharok.btremote.domain.entities.remoteInput
++
++/**
++ * A set of pointer buttons encoded as the HID mouse button byte.
++ *
++ * Reports are built from the whole set, never from the one button the current
++ * action cares about: a pointer moving during a drag must keep the left button
++ * down, and a middle click during a drag must not silently release it.
++ */
++@JvmInline
++value class MouseButtons private constructor(val value: Byte) {
++
++    val isEmpty: Boolean get() = value.toInt() == 0
++
++    infix fun with(button: MouseAction): MouseButtons =
++        MouseButtons((value.toInt() or button.byte.toInt()).toByte())
++
++    infix fun without(button: MouseAction): MouseButtons =
++        MouseButtons((value.toInt() and button.byte.toInt().inv()).toByte())
++
++    operator fun contains(button: MouseAction): Boolean =
++        value.toInt() and button.byte.toInt() != 0
++
++    companion object {
++        val NONE = MouseButtons(0)
++
++        fun of(vararg buttons: MouseAction): MouseButtons =
++            buttons.fold(NONE) { held, button -> held with button }
++    }
++}
++
++/**
++ * The pointer buttons the trackpad panel is currently holding.
++ *
++ * The drag is kept apart because it is owned by the gesture recognizer rather
++ * than by a button that is visibly down: every report merges the drag's left
++ * button into the held set instead of replacing it.
++ */
++class MouseButtonState {
++
++    private var held: MouseButtons = MouseButtons.NONE
++    private var isDragging: Boolean = false
++
++    /** The buttons to report right now. */
++    val report: MouseButtons
++        get() = if (isDragging) held with MouseAction.MOUSE_CLICK_LEFT else held
++
++    fun press(button: MouseAction): MouseButtons {
++        held = held with button
++        return report
++    }
++
++    fun release(button: MouseAction): MouseButtons {
++        held = held without button
++        return report
++    }
++
++    fun setDragging(dragging: Boolean): MouseButtons {
++        isDragging = dragging
++        return report
++    }
++
++    /**
++     * One click without losing the other buttons: the clicked button is pressed
++     * on top of the current set and then that same set is sent again. Returns
++     * the two reports so the caller sends them in order.
++     */
++    fun click(button: MouseAction): List<MouseButtons> {
++        val current = report
++        return listOf(current with button, current)
++    }
++
++    /** Drops every held button and the drag, and returns the zero report. */
++    fun reset(): MouseButtons {
++        held = MouseButtons.NONE
++        isDragging = false
++        return MouseButtons.NONE
++    }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapper.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapper.kt
+index 40b7e73..6b2a560 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapper.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapper.kt
+@@ -6,13 +6,23 @@ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ 
+ sealed interface TrackpadGestureCommand {
+ 
+-    data class Mouse(
+-        val button: MouseAction,
++    /** Relative pointer movement. [dragging] keeps the drag's left button held. */
++    data class Move(
+         val dx: Float,
+         val dy: Float,
+-        val wheel: Float
++        val dragging: Boolean
+     ) : TrackpadGestureCommand
+ 
++    /** Press then release one button without dropping the buttons already held. */
++    data class Click(val button: MouseAction) : TrackpadGestureCommand
++
++    data object DragStart : TrackpadGestureCommand
++
++    data object DragEnd : TrackpadGestureCommand
++
++    /** Relative wheel movement, sent while the held buttons stay down. */
++    data class Scroll(val wheel: Float) : TrackpadGestureCommand
++
+     data class Keyboard(
+         val press: ByteArray,
+         val release: ByteArray
+@@ -37,34 +47,27 @@ class TrackpadGestureCommandMapper(
+ 
+     fun map(output: TrackpadGestureOutput): List<TrackpadGestureCommand> = when (output) {
+         is TrackpadGestureOutput.Move -> listOf(
+-            TrackpadGestureCommand.Mouse(
+-                button = if (output.dragging) MouseAction.MOUSE_CLICK_LEFT else MouseAction.NONE,
++            TrackpadGestureCommand.Move(
+                 dx = output.dx * mouseSpeed,
+                 dy = output.dy * mouseSpeed,
+-                wheel = 0f
++                dragging = output.dragging
+             )
+         )
+ 
+         is TrackpadGestureOutput.Click -> listOf(
+-            TrackpadGestureCommand.Mouse(output.button, 0f, 0f, 0f),
+-            TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)
++            TrackpadGestureCommand.Click(output.button)
+         )
+ 
+         TrackpadGestureOutput.DragStart -> listOf(
+-            TrackpadGestureCommand.Mouse(MouseAction.MOUSE_CLICK_LEFT, 0f, 0f, 0f)
++            TrackpadGestureCommand.DragStart
+         )
+ 
+         TrackpadGestureOutput.DragEnd -> listOf(
+-            TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)
++            TrackpadGestureCommand.DragEnd
+         )
+ 
+         is TrackpadGestureOutput.Scroll -> listOf(
+-            TrackpadGestureCommand.Mouse(
+-                button = MouseAction.NONE,
+-                dx = 0f,
+-                dy = 0f,
+-                wheel = output.amount * scrollSpeed
+-            )
++            TrackpadGestureCommand.Scroll(output.amount * scrollSpeed)
+         )
+ 
+         is TrackpadGestureOutput.Zoom -> executePinch(output.scaleDelta)
+@@ -109,10 +112,7 @@ class TrackpadGestureCommandMapper(
+         if (chord == null) return emptyList()
+         val mouseButton = chord.mouseButton
+         return if (mouseButton != null) {
+-            listOf(
+-                TrackpadGestureCommand.Mouse(mouseButton, 0f, 0f, 0f),
+-                TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)
+-            )
++            listOf(TrackpadGestureCommand.Click(mouseButton))
+         } else {
+             listOf(
+                 TrackpadGestureCommand.Keyboard(
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizer.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizer.kt
+index 4008505..4f995a4 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizer.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureRecognizer.kt
+@@ -76,7 +76,6 @@ class TrackpadGestureRecognizer(
+     private data class Point(val x: Float, val y: Float)
+ 
+     private var mode = Mode.NONE
+-    private var sequenceStartTimeMillis = 0L
+     private var initialCentroid = Point(0f, 0f)
+     private var lastCentroid = Point(0f, 0f)
+     private var maxCentroidDistance = 0f
+@@ -126,7 +125,7 @@ class TrackpadGestureRecognizer(
+                 beginSequence(currentPointers, touch.eventTimeMillis)
+                 emptyList()
+             }
+-            else -> updateSequence(currentPointers, touch.eventTimeMillis)
++            else -> updateSequence(currentPointers)
+         }.also {
+             previousPointers = currentPointers
+         }
+@@ -179,7 +178,6 @@ class TrackpadGestureRecognizer(
+         val lastTapPosition = this.lastTapPosition
+         clearGestureState()
+ 
+-        sequenceStartTimeMillis = eventTimeMillis
+         initialCentroid = centroid(pointers)
+         lastCentroid = initialCentroid
+         maxCentroidDistance = 0f
+@@ -199,14 +197,13 @@ class TrackpadGestureRecognizer(
+                 // A new one-finger sequence consumes the previous tap.
+                 lastTapTimeMillis = Long.MIN_VALUE
+             }
+-            pointers.size == 2 -> beginTwoFinger(pointers, eventTimeMillis)
+-            else -> beginMultiFinger(pointers, eventTimeMillis)
++            pointers.size == 2 -> beginTwoFinger(pointers)
++            else -> beginMultiFinger(pointers)
+         }
+     }
+ 
+     private fun updateSequence(
+-        pointers: Map<Long, TrackpadPointer>,
+-        eventTimeMillis: Long
++        pointers: Map<Long, TrackpadPointer>
+     ): List<TrackpadGestureOutput> = when (mode) {
+         Mode.SINGLE -> {
+             if (pointers.size >= 2) {
+@@ -214,7 +211,7 @@ class TrackpadGestureRecognizer(
+                 if (isDragging) {
+                     outputs += TrackpadGestureOutput.DragEnd
+                 }
+-                beginTwoFinger(pointers, eventTimeMillis)
++                beginTwoFinger(pointers)
+                 outputs
+             } else {
+                 updateSingleFinger(pointers)
+@@ -222,7 +219,7 @@ class TrackpadGestureRecognizer(
+         }
+         Mode.TWO_FINGER -> {
+             if (pointers.size >= 3) {
+-                beginMultiFinger(pointers, eventTimeMillis)
++                beginMultiFinger(pointers)
+                 emptyList()
+             } else {
+                 updateTwoFinger(pointers)
+@@ -276,12 +273,8 @@ class TrackpadGestureRecognizer(
+         return outputs
+     }
+ 
+-    private fun beginTwoFinger(
+-        pointers: Map<Long, TrackpadPointer>,
+-        eventTimeMillis: Long
+-    ) {
++    private fun beginTwoFinger(pointers: Map<Long, TrackpadPointer>) {
+         mode = Mode.TWO_FINGER
+-        sequenceStartTimeMillis = eventTimeMillis
+         initialCentroid = centroid(pointers)
+         lastCentroid = initialCentroid
+         maxCentroidDistance = 0f
+@@ -348,12 +341,8 @@ class TrackpadGestureRecognizer(
+         return outputs
+     }
+ 
+-    private fun beginMultiFinger(
+-        pointers: Map<Long, TrackpadPointer>,
+-        eventTimeMillis: Long
+-    ) {
++    private fun beginMultiFinger(pointers: Map<Long, TrackpadPointer>) {
+         mode = Mode.MULTI_FINGER
+-        sequenceStartTimeMillis = eventTimeMillis
+         initialCentroid = centroid(pointers)
+         lastCentroid = initialCentroid
+         maxCentroidDistance = 0f
+@@ -380,8 +369,8 @@ class TrackpadGestureRecognizer(
+     private fun endSequence(eventTimeMillis: Long): List<TrackpadGestureOutput> {
+         val outputs = when (mode) {
+             Mode.SINGLE -> endSingleFinger(eventTimeMillis)
+-            Mode.TWO_FINGER -> endTwoFinger(eventTimeMillis)
+-            Mode.MULTI_FINGER -> endMultiFinger(eventTimeMillis)
++            Mode.TWO_FINGER -> endTwoFinger()
++            Mode.MULTI_FINGER -> endMultiFinger()
+             Mode.NONE -> emptyList()
+         }
+         clearGestureState()
+@@ -397,10 +386,10 @@ class TrackpadGestureRecognizer(
+         }
+ 
+         val pointer = singleLastPointer
+-        if (!singleMoved &&
+-            pointer != null &&
+-            eventTimeMillis - sequenceStartTimeMillis <= TAP_TIMEOUT_MILLIS
+-        ) {
++        // No duration limit: a tap is a tap even when the finger stayed down
++        // for a while. When long-press drag is on, the timeout has already
++        // turned such a press into a drag, so this cannot swallow it.
++        if (!singleMoved && pointer != null) {
+             outputs += TrackpadGestureOutput.Haptic(TrackpadHapticEvent.CLICK)
+             outputs += TrackpadGestureOutput.Click(MouseAction.MOUSE_CLICK_LEFT)
+             lastTapTimeMillis = eventTimeMillis
+@@ -409,7 +398,7 @@ class TrackpadGestureRecognizer(
+         return outputs
+     }
+ 
+-    private fun endTwoFinger(eventTimeMillis: Long): List<TrackpadGestureOutput> {
++    private fun endTwoFinger(): List<TrackpadGestureOutput> {
+         val outputs = when (twoFingerOwner) {
+             TwoFingerOwner.SCROLL -> emptyList()
+             TwoFingerOwner.PINCH -> {
+@@ -433,9 +422,7 @@ class TrackpadGestureRecognizer(
+                 }
+             }
+             TwoFingerOwner.NONE -> {
+-                if (eventTimeMillis - sequenceStartTimeMillis <= TAP_TIMEOUT_MILLIS &&
+-                    maxCentroidDistance <= tapSlop
+-                ) {
++                if (maxCentroidDistance <= tapSlop) {
+                     listOf(
+                         TrackpadGestureOutput.Haptic(TrackpadHapticEvent.CLICK),
+                         TrackpadGestureOutput.Click(MouseAction.MOUSE_CLICK_RIGHT)
+@@ -448,11 +435,10 @@ class TrackpadGestureRecognizer(
+         return outputs
+     }
+ 
+-    private fun endMultiFinger(eventTimeMillis: Long): List<TrackpadGestureOutput> {
++    private fun endMultiFinger(): List<TrackpadGestureOutput> {
+         val offsetX = lastCentroid.x - initialCentroid.x
+         val offsetY = lastCentroid.y - initialCentroid.y
+-        val isTap = eventTimeMillis - sequenceStartTimeMillis <= TAP_TIMEOUT_MILLIS &&
+-            maxCentroidDistance <= tapSlop
++        val isTap = maxCentroidDistance <= tapSlop
+         val isSwipe = !isTap && hypot(offsetX, offsetY) >= swipeDistance
+         val action = when {
+             isTap -> tapAction(multiFingerCount)
+@@ -514,7 +500,6 @@ class TrackpadGestureRecognizer(
+ 
+     private fun clearGestureState() {
+         mode = Mode.NONE
+-        sequenceStartTimeMillis = 0L
+         initialCentroid = Point(0f, 0f)
+         lastCentroid = Point(0f, 0f)
+         maxCentroidDistance = 0f
+@@ -584,7 +569,6 @@ class TrackpadGestureRecognizer(
+         const val DEFAULT_SWIPE_DISTANCE = 40f
+         const val DEFAULT_LONG_PRESS_MOVEMENT = 8f
+         const val MAX_FINGERS = 4
+-        const val TAP_TIMEOUT_MILLIS = 300L
+         const val DOUBLE_TAP_MAX_DELAY_MILLIS = 280L
+         const val DOUBLE_TAP_MAX_DISTANCE = 30f
+         const val PINCH_LATCH_RATIO = 0.06f
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
+index 40970bf..1a0e504 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
+@@ -4,7 +4,7 @@ import androidx.lifecycle.ViewModel
+ import androidx.lifecycle.viewModelScope
+ import com.atharok.btremote.common.utils.KEYBOARD_REPORT_ID
+ import com.atharok.btremote.common.utils.MOUSE_REPORT_ID
+-import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++import com.atharok.btremote.domain.entities.remoteInput.MouseButtons
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLedState
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.HapticIntensity
+@@ -122,11 +122,11 @@ class RemoteViewModel(
+     }
+ 
+     // Mouse
+-    val sendMouseReport: (MouseAction, Float, Float, Float) -> Unit = { input, x, y, wheel ->
++    val sendMouseReport: (MouseButtons, Float, Float, Float) -> Unit = { buttons, x, y, wheel ->
+         val xInt = x.roundToInt().coerceIn(-127, 127)
+         val yInt = y.roundToInt().coerceIn(-127, 127)
+         val wheelInt = wheel.roundToInt().coerceIn(-127, 127)
+-        val bytes: ByteArray = byteArrayOf(input.byte, xInt.toByte(), yInt.toByte(), wheelInt.toByte())
++        val bytes: ByteArray = byteArrayOf(buttons.value, xInt.toByte(), yInt.toByte(), wheelInt.toByte())
+         sendReport(MOUSE_REPORT_ID, bytes)
+     }
+ 
+diff --git a/app/src/main/java/com/atharok/btremote/ui/views/mouse/MacTrackpad.kt b/app/src/main/java/com/atharok/btremote/ui/views/mouse/MacTrackpad.kt
+index a35d099..fba2129 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/views/mouse/MacTrackpad.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/views/mouse/MacTrackpad.kt
+@@ -21,7 +21,6 @@ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.LifecycleEventObserver
+ import androidx.lifecycle.compose.LocalLifecycleOwner
+ import com.atharok.btremote.domain.entities.remoteInput.InputReleaseCoordinator
+-import com.atharok.btremote.domain.entities.remoteInput.MouseAction
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureCommand
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureCommandMapper
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureOutput
+@@ -30,7 +29,6 @@ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadPointer
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadTouch
+ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.ui.components.DefaultElevatedCard
+-import com.atharok.btremote.ui.haptics.LocalHapticActions
+ import kotlinx.coroutines.Job
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.launch
+@@ -51,8 +49,8 @@ fun MacTrackpad(
+     scrollSpeed: Float,
+     shouldInvertMouseScrollingDirection: Boolean,
+     trackpadSettings: TrackpadSettings,
+-    sendMouseInput: (MouseAction, Float, Float, Float) -> Unit,
+-    sendKeyboardReport: (ByteArray) -> Unit,
++    onGestureCommands: (List<TrackpadGestureCommand>) -> Unit,
++    onRelease: () -> Unit,
+     releaseCoordinator: InputReleaseCoordinator,
+     shape: Shape,
+     modifier: Modifier = Modifier
+@@ -82,35 +80,17 @@ fun MacTrackpad(
+             scrollSpeed = scrollSpeed
+         )
+     }
+-    val hapticActions = LocalHapticActions.current
+-    val currentHapticActions by rememberUpdatedState(hapticActions)
+-    val currentSendMouseInput by rememberUpdatedState(sendMouseInput)
+-    val currentSendKeyboardReport by rememberUpdatedState(sendKeyboardReport)
++    val currentOnGestureCommands by rememberUpdatedState(onGestureCommands)
++    val currentOnRelease by rememberUpdatedState(onRelease)
+     val lifecycleOwner = LocalLifecycleOwner.current
+ 
+     fun execute(outputs: List<TrackpadGestureOutput>) {
+-        commandMapper.map(outputs).forEach { command ->
+-            when (command) {
+-                is TrackpadGestureCommand.Mouse -> currentSendMouseInput(
+-                    command.button,
+-                    command.dx,
+-                    command.dy,
+-                    command.wheel
+-                )
+-                is TrackpadGestureCommand.Keyboard -> {
+-                    currentSendKeyboardReport(command.press)
+-                    currentSendKeyboardReport(command.release)
+-                }
+-                is TrackpadGestureCommand.Haptic -> {
+-                    currentHapticActions.performTrackpad(command.event)
+-                }
+-            }
+-        }
++        currentOnGestureCommands(commandMapper.map(outputs))
+     }
+ 
+     fun resetAndRelease() {
+         execute(recognizer.reset())
+-        currentSendMouseInput(MouseAction.NONE, 0f, 0f, 0f)
++        currentOnRelease()
+     }
+ 
+     DisposableEffect(lifecycleOwner, recognizer, releaseCoordinator) {
+diff --git a/app/src/main/java/com/atharok/btremote/ui/views/mouse/TrackpadPage.kt b/app/src/main/java/com/atharok/btremote/ui/views/mouse/TrackpadPage.kt
+index 5dc0ecf..598f362 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/views/mouse/TrackpadPage.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/views/mouse/TrackpadPage.kt
+@@ -1,44 +1,118 @@
+ package com.atharok.btremote.ui.views.mouse
+ 
++import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.fillMaxHeight
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material3.Icon
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberUpdatedState
+ import androidx.compose.ui.Modifier
+-import androidx.compose.ui.graphics.RectangleShape
+ import androidx.compose.ui.graphics.Shape
+ import androidx.compose.ui.graphics.vector.ImageVector
+ import androidx.compose.ui.res.dimensionResource
+ import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.unit.dp
+ import com.atharok.btremote.R
+ import com.atharok.btremote.common.utils.AppIcons
+ import com.atharok.btremote.domain.entities.remoteInput.InputReleaseCoordinator
+ import com.atharok.btremote.domain.entities.remoteInput.MouseAction
++import com.atharok.btremote.domain.entities.remoteInput.MouseButtonState
++import com.atharok.btremote.domain.entities.remoteInput.MouseButtons
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.ScrollStep
++import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureCommand
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.ui.components.customButtons.SurfaceButton
+ import com.atharok.btremote.ui.haptics.LocalHapticActions
+ 
++private val ScrollColumnWidth = 46.dp
++private val TrackpadCellGap = 6.dp
++
+ /**
+- * The full-screen trackpad page: the gesture surface plus the right-side
++ * The full-screen trackpad page: the gesture surface plus a fixed-width
+  * Up / middle-click / Down column. Left and right clicks come from the surface
+  * itself, so no separate button row is needed.
++ *
++ * Every mouse report is built from the same held-button set, so a drag keeps its
++ * left button through a middle click, a click or a scroll.
+  */
+ @Composable
+ fun TrackpadPage(
+     remoteSettings: RemoteSettings,
+     trackpadSettings: TrackpadSettings,
+-    sendMouseInput: (MouseAction, Float, Float, Float) -> Unit,
++    sendMouseInput: (MouseButtons, Float, Float, Float) -> Unit,
+     sendKeyboardReport: (ByteArray) -> Unit,
+     releaseCoordinator: InputReleaseCoordinator,
+     modifier: Modifier = Modifier
+ ) {
+     val hapticActions = LocalHapticActions.current
++    val currentHapticActions by rememberUpdatedState(hapticActions)
++    val currentSendMouseInput by rememberUpdatedState(sendMouseInput)
++    val currentSendKeyboardReport by rememberUpdatedState(sendKeyboardReport)
++    val mouseButtons = remember { MouseButtonState() }
++
++    fun send(buttons: MouseButtons, dx: Float = 0f, dy: Float = 0f, wheel: Float = 0f) {
++        currentSendMouseInput(buttons, dx, dy, wheel)
++    }
++
++    // Idempotent: releasing twice sends a second zero report, which is not a
++    // second button transition on the host.
++    fun releaseEverything() {
++        send(mouseButtons.reset())
++    }
++
++    fun execute(commands: List<TrackpadGestureCommand>) {
++        commands.forEach { command ->
++            when (command) {
++                is TrackpadGestureCommand.Move -> {
++                    send(
++                        buttons = mouseButtons.setDragging(command.dragging),
++                        dx = command.dx,
++                        dy = command.dy
++                    )
++                }
++
++                TrackpadGestureCommand.DragStart -> send(mouseButtons.setDragging(true))
++
++                TrackpadGestureCommand.DragEnd -> send(mouseButtons.setDragging(false))
++
++                is TrackpadGestureCommand.Click -> {
++                    mouseButtons.click(command.button).forEach { send(it) }
++                }
++
++                is TrackpadGestureCommand.Scroll -> {
++                    send(buttons = mouseButtons.report, wheel = command.wheel)
++                }
++
++                is TrackpadGestureCommand.Keyboard -> {
++                    currentSendKeyboardReport(command.press)
++                    currentSendKeyboardReport(command.release)
++                }
++
++                is TrackpadGestureCommand.Haptic -> {
++                    currentHapticActions.performTrackpad(command.event)
++                }
++            }
++        }
++    }
++
++    DisposableEffect(releaseCoordinator) {
++        val unregister = releaseCoordinator.register { releaseEverything() }
++        onDispose {
++            unregister()
++            releaseEverything()
++        }
++    }
++
++    val shape = RoundedCornerShape(dimensionResource(id = R.dimen.card_corner_radius))
+ 
+     Row(modifier = modifier) {
+         MacTrackpad(
+@@ -46,20 +120,21 @@ fun TrackpadPage(
+             scrollSpeed = remoteSettings.mouseScrollSpeed,
+             shouldInvertMouseScrollingDirection = remoteSettings.shouldInvertMouseScrollingDirection,
+             trackpadSettings = trackpadSettings,
+-            sendMouseInput = sendMouseInput,
+-            sendKeyboardReport = sendKeyboardReport,
++            onGestureCommands = ::execute,
++            onRelease = ::releaseEverything,
+             releaseCoordinator = releaseCoordinator,
+-            shape = RoundedCornerShape(dimensionResource(id = R.dimen.card_corner_radius)),
++            shape = shape,
+             modifier = Modifier
+-                .weight(0.85f)
++                .weight(1f)
+                 .fillMaxHeight()
+-                .padding(end = dimensionResource(id = R.dimen.padding_min))
++                .padding(end = TrackpadCellGap)
+         )
+ 
+         Column(
+             modifier = Modifier
+-                .weight(0.15f)
+-                .fillMaxHeight()
++                .width(ScrollColumnWidth)
++                .fillMaxHeight(),
++            verticalArrangement = Arrangement.spacedBy(TrackpadCellGap)
+         ) {
+             ScrollButton(
+                 icon = AppIcons.MouseScrollUp,
+@@ -67,28 +142,28 @@ fun TrackpadPage(
+                 direction = 1,
+                 scrollSpeed = remoteSettings.mouseScrollSpeed,
+                 invertScroll = remoteSettings.shouldInvertMouseScrollingDirection,
+-                sendMouseInput = sendMouseInput,
+-                onHaptic = hapticActions.scrollTick,
++                onWheel = { wheel ->
++                    send(buttons = mouseButtons.report, wheel = wheel)
++                    currentHapticActions.scrollTick()
++                },
++                shape = shape,
+                 modifier = Modifier
+                     .fillMaxWidth()
+                     .weight(1f)
+-                    .padding(bottom = dimensionResource(id = R.dimen.padding_min)),
+-                shape = RoundedCornerShape(dimensionResource(id = R.dimen.card_corner_radius))
+             )
+ 
+             SurfaceButton(
+                 touchDown = {
+-                    hapticActions.trackpadTap()
+-                    sendMouseInput(MouseAction.MOUSE_CLICK_MIDDLE, 0f, 0f, 0f)
++                    currentHapticActions.trackpadTap()
++                    send(mouseButtons.press(MouseAction.MOUSE_CLICK_MIDDLE))
+                 },
+                 touchUp = {
+-                    sendMouseInput(MouseAction.NONE, 0f, 0f, 0f)
++                    send(mouseButtons.release(MouseAction.MOUSE_CLICK_MIDDLE))
+                 },
+                 modifier = Modifier
+                     .fillMaxWidth()
+-                    .weight(1f)
+-                    .padding(vertical = dimensionResource(id = R.dimen.padding_min)),
+-                shape = RectangleShape
++                    .weight(1f),
++                shape = shape
+             ) {
+                 Icon(
+                     imageVector = AppIcons.Mouse,
+@@ -102,18 +177,24 @@ fun TrackpadPage(
+                 direction = -1,
+                 scrollSpeed = remoteSettings.mouseScrollSpeed,
+                 invertScroll = remoteSettings.shouldInvertMouseScrollingDirection,
+-                sendMouseInput = sendMouseInput,
+-                onHaptic = hapticActions.scrollTick,
++                onWheel = { wheel ->
++                    send(buttons = mouseButtons.report, wheel = wheel)
++                    currentHapticActions.scrollTick()
++                },
++                shape = shape,
+                 modifier = Modifier
+                     .fillMaxWidth()
+                     .weight(1f)
+-                    .padding(top = dimensionResource(id = R.dimen.padding_min)),
+-                shape = RoundedCornerShape(dimensionResource(id = R.dimen.card_corner_radius))
+             )
+         }
+     }
+ }
+ 
++/**
++ * One tap is one small relative wheel step. The press haptic is replaced by the
++ * scroll tick, and the wheel report is sent on its own so the host cannot merge
++ * it away with a following zero report.
++ */
+ @Composable
+ private fun ScrollButton(
+     icon: ImageVector,
+@@ -121,24 +202,19 @@ private fun ScrollButton(
+     direction: Int,
+     scrollSpeed: Float,
+     invertScroll: Boolean,
+-    sendMouseInput: (MouseAction, Float, Float, Float) -> Unit,
+-    onHaptic: () -> Unit,
+-    modifier: Modifier,
+-    shape: Shape
++    onWheel: (Float) -> Unit,
++    shape: Shape,
++    modifier: Modifier = Modifier
+ ) {
+     SurfaceButton(
+         touchDown = {
+-            sendMouseInput(
+-                MouseAction.NONE,
+-                0f,
+-                0f,
++            onWheel(
+                 ScrollStep.wheel(
+                     direction = direction,
+                     scrollSpeed = scrollSpeed,
+                     invertScroll = invertScroll
+                 )
+             )
+-            onHaptic()
+         },
+         touchUp = {},
+         modifier = modifier,
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/MouseButtonStateTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/MouseButtonStateTest.kt
+new file mode 100644
+index 0000000..1b3613b
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/MouseButtonStateTest.kt
+@@ -0,0 +1,96 @@
++package com.atharok.btremote.domain.entities.remoteInput
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class MouseButtonStateTest {
++
++    private val left = MouseAction.MOUSE_CLICK_LEFT
++    private val right = MouseAction.MOUSE_CLICK_RIGHT
++    private val middle = MouseAction.MOUSE_CLICK_MIDDLE
++
++    @Test
++    fun buttonsMergeAndReleaseBitByBit() {
++        val buttons = MouseButtons.NONE with left with middle
++
++        assertTrue(left in buttons)
++        assertTrue(middle in buttons)
++        assertFalse(right in buttons)
++
++        val afterRelease = buttons without left
++        assertFalse(left in afterRelease)
++        assertTrue(middle in afterRelease)
++        assertEquals(0, MouseButtons.NONE.value.toInt())
++        assertTrue(MouseButtons.NONE.isEmpty)
++    }
++
++    @Test
++    fun draggingKeepsTheLeftButtonInEveryReport() {
++        val state = MouseButtonState()
++
++        assertEquals(MouseAction.MOUSE_CLICK_LEFT.byte, state.setDragging(true).value)
++        assertEquals(
++            (MouseAction.MOUSE_CLICK_LEFT.byte.toInt() or MouseAction.MOUSE_CLICK_MIDDLE.byte.toInt()).toByte(),
++            state.press(middle).value
++        )
++    }
++
++    @Test
++    fun releasingMiddleDuringADragKeepsTheDragHeld() {
++        val state = MouseButtonState()
++        state.setDragging(true)
++        state.press(middle)
++
++        val report = state.release(middle)
++
++        assertEquals(MouseAction.MOUSE_CLICK_LEFT.byte, report.value)
++        assertFalse(middle in report)
++    }
++
++    @Test
++    fun aClickDuringADragPulsesOnTopOfTheHeldSet() {
++        val state = MouseButtonState()
++        state.setDragging(true)
++        state.press(middle)
++
++        val reports = state.click(right)
++
++        assertEquals(2, reports.size)
++        assertEquals(
++            MouseAction.MOUSE_CLICK_LEFT.byte.toInt() or
++                MouseAction.MOUSE_CLICK_RIGHT.byte.toInt() or
++                MouseAction.MOUSE_CLICK_MIDDLE.byte.toInt(),
++            reports[0].value.toInt()
++        )
++        // The release report restores both the drag and the middle button.
++        assertEquals(reports[1].value, state.report.value)
++        assertTrue(left in reports[1])
++        assertTrue(middle in reports[1])
++        assertFalse(right in reports[1])
++    }
++
++    @Test
++    fun endingTheDragReleasesOnlyTheLeftButton() {
++        val state = MouseButtonState()
++        state.setDragging(true)
++        state.press(middle)
++
++        val report = state.setDragging(false)
++
++        assertFalse(left in report)
++        assertTrue(middle in report)
++    }
++
++    @Test
++    fun resetDropsTheDragAndEveryButton() {
++        val state = MouseButtonState()
++        state.setDragging(true)
++        state.press(middle)
++
++        assertEquals(MouseButtons.NONE, state.reset())
++        assertTrue(state.report.isEmpty)
++        assertTrue(state.report.value.toInt() == 0)
++    }
++}
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapperTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapperTest.kt
+index 6a5c41a..068d342 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapperTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadGestureCommandMapperTest.kt
+@@ -17,32 +17,29 @@ class TrackpadGestureCommandMapperTest {
+     )
+ 
+     @Test
+-    fun mapsMoveClickDragAndScrollToExistingMouseReports() {
++    fun mapsMoveClickDragAndScrollToSemanticCommands() {
+         assertEquals(
+-            listOf(TrackpadGestureCommand.Mouse(MouseAction.NONE, 4f, -6f, 0f)),
++            listOf(TrackpadGestureCommand.Move(4f, -6f, dragging = false)),
+             mapper.map(TrackpadGestureOutput.Move(2f, -3f, dragging = false))
+         )
+         assertEquals(
+-            listOf(TrackpadGestureCommand.Mouse(MouseAction.MOUSE_CLICK_LEFT, 4f, -6f, 0f)),
++            listOf(TrackpadGestureCommand.Move(4f, -6f, dragging = true)),
+             mapper.map(TrackpadGestureOutput.Move(2f, -3f, dragging = true))
+         )
+         assertEquals(
+-            listOf(
+-                TrackpadGestureCommand.Mouse(MouseAction.MOUSE_CLICK_LEFT, 0f, 0f, 0f),
+-                TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)
+-            ),
++            listOf(TrackpadGestureCommand.Click(MouseAction.MOUSE_CLICK_LEFT)),
+             mapper.map(TrackpadGestureOutput.Click(MouseAction.MOUSE_CLICK_LEFT))
+         )
+         assertEquals(
+-            listOf(TrackpadGestureCommand.Mouse(MouseAction.MOUSE_CLICK_LEFT, 0f, 0f, 0f)),
++            listOf(TrackpadGestureCommand.DragStart),
+             mapper.map(TrackpadGestureOutput.DragStart)
+         )
+         assertEquals(
+-            listOf(TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)),
++            listOf(TrackpadGestureCommand.DragEnd),
+             mapper.map(TrackpadGestureOutput.DragEnd)
+         )
+         assertEquals(
+-            listOf(TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 3f)),
++            listOf(TrackpadGestureCommand.Scroll(3f)),
+             mapper.map(TrackpadGestureOutput.Scroll(2))
+         )
+     }
+@@ -70,16 +67,11 @@ class TrackpadGestureCommandMapperTest {
+             when {
+                 chord == null -> assertTrue("$action", commands.isEmpty())
+                 chord.mouseButton != null -> {
+-                    assertEquals("$action", 2, commands.size)
+-                    assertEquals(
+-                        "$action press",
+-                        TrackpadGestureCommand.Mouse(chord.mouseButton, 0f, 0f, 0f),
+-                        commands[0]
+-                    )
++                    assertEquals("$action", 1, commands.size)
+                     assertEquals(
+-                        "$action release",
+-                        TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f),
+-                        commands[1]
++                        "$action click",
++                        TrackpadGestureCommand.Click(chord.mouseButton),
++                        commands.single()
+                     )
+                 }
+                 else -> {
+@@ -94,12 +86,9 @@ class TrackpadGestureCommandMapperTest {
+     }
+ 
+     @Test
+-    fun middleClickUsesTheMouseReportWhileSpotlightUsesAKeyboardReport() {
++    fun middleClickUsesAMouseClickWhileSpotlightUsesAKeyboardReport() {
+         assertEquals(
+-            listOf(
+-                TrackpadGestureCommand.Mouse(MouseAction.MOUSE_CLICK_MIDDLE, 0f, 0f, 0f),
+-                TrackpadGestureCommand.Mouse(MouseAction.NONE, 0f, 0f, 0f)
+-            ),
++            listOf(TrackpadGestureCommand.Click(MouseAction.MOUSE_CLICK_MIDDLE)),
+             mapper.map(TrackpadGestureOutput.Action(TrackpadGestureAction.MIDDLE_CLICK))
+         )
+ 
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadLongPressTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadLongPressTest.kt
+index d1f07a2..8083ca3 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadLongPressTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/trackpad/TrackpadLongPressTest.kt
+@@ -1,5 +1,6 @@
+ package com.atharok.btremote.domain.entities.remoteInput.trackpad
+ 
++import com.atharok.btremote.domain.entities.remoteInput.MouseAction
+ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertTrue
+@@ -61,6 +62,26 @@ class TrackpadLongPressTest {
+         assertTrue(recognizer.onLongPressTimeout().isEmpty())
+     }
+ 
++    @Test
++    fun aSlowTapStillClicksWhenLongPressDragIsOff() {
++        val recognizer = TrackpadGestureRecognizer(
++            settings = TrackpadSettings(longPressDragEnabled = false)
++        )
++
++        recognizer.onTouch(touch(0, pointer(0, 10f, 10f)))
++        assertTrue(recognizer.onLongPressTimeout().isEmpty())
++
++        // The finger stayed down well past the old tap timeout; with no
++        // long-press recognizer to compete with, the lift is still a click.
++        assertEquals(
++            listOf(
++                TrackpadGestureOutput.Haptic(TrackpadHapticEvent.CLICK),
++                TrackpadGestureOutput.Click(MouseAction.MOUSE_CLICK_LEFT)
++            ),
++            recognizer.onTouch(touch(900))
++        )
++    }
++
+     @Test
+     fun aLongPressDragDoesNotAlsoClickOnLift() {
+         val recognizer = TrackpadGestureRecognizer()
+-- 
+2.49.0
+

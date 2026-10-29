@@ -1,0 +1,606 @@
+From e64caafd6232f62e7a1966a52f67198f8ba2bfc6 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 01:23:18 +0800
+Subject: [PATCH 32/33] =?UTF-8?q?fix(android):=20=E5=AE=8C=E5=96=84?=
+ =?UTF-8?q?=E6=A8=AA=E5=B1=8F=E5=AF=BC=E8=88=AA=E4=B8=8E=20Mac=20=E9=94=AE?=
+ =?UTF-8?q?=E5=B8=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 非输入页改为 SCREEN_ORIENTATION_UNSPECIFIED，仅输入页锁定横屏，旋转由 configChanges 处理
+- 输入页菜单进入设置复用已有 Settings，避免重复堆栈
+- 底排改为 Ctrl/Opt/Cmd/Space/Cmd/Opt，Caps 显示 Caps，Tab/Enter 增加图标加文字
+- 关闭长按拖拽时不再创建 350ms 计时协程
+---
+ .../advancedKeyboard/AdvancedKeyboardKey.kt   | 85 ++++++++++++++++---
+ .../keyboard/mac/MacKeyboardLayout.kt         | 52 +++++++++---
+ .../atharok/btremote/ui/app/BtRemoteApp.kt    | 12 ++-
+ .../ui/navigation/AppOrientationPolicy.kt     | 20 +++--
+ .../ui/navigation/DockVisibilityPolicy.kt     |  8 +-
+ .../ui/views/keyboard/AdvancedKeyboard.kt     |  2 +-
+ .../btremote/ui/views/mouse/MacTrackpad.kt    | 12 ++-
+ app/src/main/res/values/strings.xml           |  7 ++
+ .../mac/MacKeyboardLayoutFactoryTest.kt       | 34 ++++++++
+ .../keyboard/mac/MacKeyboardLayoutTest.kt     | 55 ++++++++++++
+ .../ui/navigation/AppOrientationPolicyTest.kt | 36 +++++---
+ 11 files changed, 265 insertions(+), 58 deletions(-)
+
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt
+index 0ca91d1..d494a88 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/advancedKeyboard/AdvancedKeyboardKey.kt
+@@ -1,16 +1,30 @@
+ package com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard
+ 
+ import androidx.annotation.StringRes
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.aspectRatio
++import androidx.compose.foundation.layout.fillMaxHeight
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.padding
++import androidx.compose.material3.Icon
++import androidx.compose.material3.LocalContentColor
+ import androidx.compose.runtime.Composable
++import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.graphics.Shape
++import androidx.compose.ui.res.dimensionResource
+ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.Dp
++import com.atharok.btremote.R
++import com.atharok.btremote.common.extensions.autoMirroredIcon
+ import com.atharok.btremote.domain.entities.remoteInput.RemoteButtonProperties
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
++import com.atharok.btremote.ui.components.AdaptiveText
+ import com.atharok.btremote.ui.components.customButtons.CharacterKeyboardKey
+ import com.atharok.btremote.ui.components.customButtons.IconSurfaceButton
++import com.atharok.btremote.ui.components.customButtons.SurfaceButton
+ import com.atharok.btremote.ui.components.customButtons.TextKeyboardKey
+ 
+ enum class AdvancedKeyBehavior {
+@@ -153,9 +167,15 @@ data class CapsLockAdvancedKeyboardKey(
+     }
+ }
+ 
++/**
++ * Icon key with an optional legend printed next to the icon, for caps that show
++ * both a symbol and a word (Tab, Enter). When [trailingTextRes] is null the cap
++ * keeps the plain icon-only presentation.
++ */
+ data class IconAdvancedKeyboardKey(
+     val properties: RemoteButtonProperties,
+-    override val weight: Float
++    override val weight: Float,
++    @param:StringRes val trailingTextRes: Int? = null
+ ): AdvancedKeyboardKey() {
+ 
+     override val byte: Byte = properties.input[1]
+@@ -169,17 +189,56 @@ data class IconAdvancedKeyboardKey(
+         shape: Shape,
+         elevation: Dp
+     ) {
+-        IconSurfaceButton(
+-            image = properties.icon,
+-            contentDescription = stringResource(properties.stringRes),
+-            touchDown = {
+-                touchDown(byte)
+-            },
+-            touchUp = { touchUp(byte) },
+-            modifier = modifier,
+-            shape = shape,
+-            elevation = elevation,
+-            iconFillFraction = 0.4f
+-        )
++        val contentDescription = stringResource(properties.stringRes)
++        val trailingTextRes = this.trailingTextRes
++
++        if (trailingTextRes == null) {
++            IconSurfaceButton(
++                image = properties.icon,
++                contentDescription = contentDescription,
++                touchDown = {
++                    touchDown(byte)
++                },
++                touchUp = { touchUp(byte) },
++                modifier = modifier,
++                shape = shape,
++                elevation = elevation,
++                iconFillFraction = 0.4f
++            )
++        } else {
++            SurfaceButton(
++                touchDown = { touchDown(byte) },
++                touchUp = { touchUp(byte) },
++                modifier = modifier,
++                shape = shape,
++                elevation = elevation
++            ) {
++                Row(
++                    modifier = Modifier
++                        .fillMaxSize()
++                        .padding(horizontal = dimensionResource(id = R.dimen.padding_min)),
++                    horizontalArrangement = Arrangement.Center,
++                    verticalAlignment = Alignment.CenterVertically
++                ) {
++                    Icon(
++                        imageVector = properties.icon,
++                        contentDescription = contentDescription,
++                        modifier = Modifier
++                            .autoMirroredIcon(properties.icon)
++                            .fillMaxHeight(0.4f)
++                            .aspectRatio(1f),
++                        tint = LocalContentColor.current
++                    )
++                    AdaptiveText(
++                        text = stringResource(trailingTextRes),
++                        percent = 0.35f,
++                        modifier = Modifier
++                            .fillMaxHeight(0.5f)
++                            .weight(1f)
++                            .padding(start = dimensionResource(id = R.dimen.padding_min))
++                    )
++                }
++            }
++        }
+     }
+ }
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayout.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayout.kt
+index 976979e..640e56c 100644
+--- a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayout.kt
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayout.kt
+@@ -1,5 +1,6 @@
+ package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
+ 
++import androidx.annotation.StringRes
+ import androidx.compose.ui.text.style.TextAlign
+ import com.atharok.btremote.R
+ import com.atharok.btremote.domain.entities.remoteInput.RemoteButtonProperties
+@@ -121,11 +122,18 @@ object MacKeyboardSpec {
+             kind = MacKeyboardKeyKind.MODIFIER
+         )
+ 
+-    private fun iconKey(properties: RemoteButtonProperties, weight: Float) =
+-        MacKeyboardKey(
+-            key = IconAdvancedKeyboardKey(properties = properties, weight = weight),
+-            kind = MacKeyboardKeyKind.ORDINARY
+-        )
++    private fun iconKey(
++        properties: RemoteButtonProperties,
++        weight: Float,
++        @StringRes trailingTextRes: Int? = null
++    ) = MacKeyboardKey(
++        key = IconAdvancedKeyboardKey(
++            properties = properties,
++            weight = weight,
++            trailingTextRes = trailingTextRes
++        ),
++        kind = MacKeyboardKeyKind.ORDINARY
++    )
+ 
+     private val escape = resourceKey(KeyboardKey.KEY_ESCAPE.byte, R.string.escape, MacKeyboardKeyWeight.ESCAPE)
+ 
+@@ -151,7 +159,11 @@ object MacKeyboardSpec {
+      */
+     val functionRow = MacKeyboardRow(listOf(escape) + functionKeys)
+ 
+-    val tab = iconKey(RemoteButtonProperties.KeyboardTabButton, MacKeyboardKeyWeight.TAB)
++    val tab = iconKey(
++        RemoteButtonProperties.KeyboardTabButton,
++        MacKeyboardKeyWeight.TAB,
++        trailingTextRes = R.string.keyboard_tab
++    )
+ 
+     val backspace = iconKey(RemoteButtonProperties.KeyboardBackspaceButton, MacKeyboardKeyWeight.BACKSPACE)
+ 
+@@ -159,14 +171,18 @@ object MacKeyboardSpec {
+         key = ResourceTextAdvancedKeyboardKey(
+             byte = KeyboardKey.KEY_CAPS_LOCK.byte,
+             weight = MacKeyboardKeyWeight.CAPS_LOCK,
+-            textRes = R.string.caps_lock,
++            textRes = R.string.mac_caps,
+             textAlign = TextAlign.Start,
+             behavior = AdvancedKeyBehavior.CAPS_LOCK
+         ),
+         kind = MacKeyboardKeyKind.CAPS_LOCK
+     )
+ 
+-    val enter = iconKey(RemoteButtonProperties.KeyboardEnterButton, MacKeyboardKeyWeight.ENTER)
++    val enter = iconKey(
++        RemoteButtonProperties.KeyboardEnterButton,
++        MacKeyboardKeyWeight.ENTER,
++        trailingTextRes = R.string.enter
++    )
+ 
+     val shiftLeft = modifierKey(
+         byte = KeyboardKey.KEY_SHIFT_LEFT.byte,
+@@ -199,30 +215,38 @@ object MacKeyboardSpec {
+ 
+     val controlLeft = modifierKey(
+         byte = KeyboardKey.KEY_CTRL_LEFT.byte,
+-        textRes = R.string.ctrl,
++        textRes = R.string.mac_ctrl,
+         textAlign = TextAlign.Start,
+         weight = MacKeyboardKeyWeight.CONTROL
+     )
+ 
+     val optionLeft = modifierKey(
+         byte = KeyboardKey.KEY_ALT.byte,
+-        textRes = R.string.alt,
++        textRes = R.string.mac_opt,
+         textAlign = TextAlign.Start,
+         weight = MacKeyboardKeyWeight.OPTION
+     )
+ 
+     val commandLeft = modifierKey(
+         byte = KeyboardKey.KEY_META_LEFT.byte,
+-        textRes = R.string.meta,
++        textRes = R.string.mac_cmd,
+         textAlign = TextAlign.Start,
+         weight = MacKeyboardKeyWeight.COMMAND
+     )
+ 
+-    val space = iconKey(RemoteButtonProperties.KeyboardSpaceBarButton, MacKeyboardKeyWeight.SPACE)
++    /** The MacBook space bar prints the word, not an icon. */
++    val space = MacKeyboardKey(
++        key = ResourceTextAdvancedKeyboardKey(
++            byte = KeyboardKey.KEY_SPACE_BAR.byte,
++            weight = MacKeyboardKeyWeight.SPACE,
++            textRes = R.string.mac_space
++        ),
++        kind = MacKeyboardKeyKind.ORDINARY
++    )
+ 
+     val commandRight = modifierKey(
+         byte = KeyboardKey.KEY_META_RIGHT.byte,
+-        textRes = R.string.meta,
++        textRes = R.string.mac_cmd,
+         textAlign = TextAlign.End,
+         weight = MacKeyboardKeyWeight.COMMAND
+     )
+@@ -230,7 +254,7 @@ object MacKeyboardSpec {
+     /** Right Option. It keeps the Alt Gr usage so ISO layouts never lose that modifier. */
+     val optionRight = modifierKey(
+         byte = KeyboardKey.KEY_ALT_GR.byte,
+-        textRes = R.string.alt_gr,
++        textRes = R.string.mac_opt,
+         textAlign = TextAlign.End,
+         weight = MacKeyboardKeyWeight.OPTION
+     )
+diff --git a/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt b/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
+index 2de729d..5cda87f 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
+@@ -92,10 +92,13 @@ fun BtRemoteApp(
+ 
+     // One listener drives the window orientation for every destination, so the
+     // pages never race each other with their own DisposableEffect requests.
++    // Only the input page pins landscape; every other page releases the window
++    // back to the system orientation. The manifest handles the configuration
++    // changes, so a rotation never recreates the activity.
+     LaunchedEffect(activity, currentRoute) {
+         activity?.requestedOrientation = when (AppOrientationPolicy.orientationFor(currentRoute)) {
+             AppScreenOrientation.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+-            AppScreenOrientation.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
++            AppScreenOrientation.UNSPECIFIED -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+         }
+     }
+ 
+@@ -284,7 +287,12 @@ fun BtRemoteApp(
+                             navigateToDeviceSelection = {
+                                 navController.navigateToMainTab(AppMainTab.CONNECT)
+                             },
+-                            navigateToSettings = navigateToSettings,
++                            // Reuse the Settings entry already on the stack when
++                            // coming from the input page, so Input > Settings never
++                            // pushes a second Settings on top of the first one.
++                            navigateToSettings = {
++                                navController.navigateToMainTab(AppMainTab.SETTINGS)
++                            },
+                             modifier = Modifier
+                         )
+                     },
+diff --git a/app/src/main/java/com/atharok/btremote/ui/navigation/AppOrientationPolicy.kt b/app/src/main/java/com/atharok/btremote/ui/navigation/AppOrientationPolicy.kt
+index 5804056..e52e5b1 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/navigation/AppOrientationPolicy.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/navigation/AppOrientationPolicy.kt
+@@ -3,19 +3,23 @@ package com.atharok.btremote.ui.navigation
+ /** The orientation a destination asks the window to take. */
+ enum class AppScreenOrientation {
+     LANDSCAPE,
+-    PORTRAIT
++
++    /** Follow the system orientation; the page does not pin itself. */
++    UNSPECIFIED
+ }
+ 
+ /**
+  * Central orientation policy for the whole navigation graph.
+  *
+- * The keyboard and the trackpad need the long edge, so the input destination is
+- * landscape. Setup and Settings are portrait pages; keeping them portrait means
+- * opening either one from the input page asks the system to turn the device back
+- * instead of leaving a landscape page with no dock.
++ * The keyboard and the trackpad need the long edge, so the input destination
++ * asks for sensor landscape. Every other page, including the setup, discovery,
++ * pairing and settings pages, follows the system: rotating the device is always
++ * allowed, and the pages adapt to whichever orientation the user chose.
+  *
+- * Every destination that is not the input page is portrait, including the
+- * permission, activation, discovery and pairing pages.
++ * Because those pages can be landscape, the dock is not tied to the route
++ * alone: [DockVisibilityPolicy] hides it whenever a main page is landscape, so
++ * the device and settings pages keep the same portrait-only dock as before
++ * without the window forcing the device to rotate back.
+  */
+ object AppOrientationPolicy {
+ 
+@@ -23,6 +27,6 @@ object AppOrientationPolicy {
+         if (route == AppNavDestination.InputDestination.route) {
+             AppScreenOrientation.LANDSCAPE
+         } else {
+-            AppScreenOrientation.PORTRAIT
++            AppScreenOrientation.UNSPECIFIED
+         }
+ }
+diff --git a/app/src/main/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicy.kt b/app/src/main/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicy.kt
+index 1bf8e07..59ab0d6 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicy.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/navigation/DockVisibilityPolicy.kt
+@@ -10,9 +10,11 @@ enum class AppMainTab(val route: String) {
+ /**
+  * The dock is the portrait navigation for the two main pages.
+  *
+- * The input page is landscape-only and draws its own toolbar, and the
+- * permission, activation, discovery, pairing and settings sub-pages are
+- * one-way flows that keep their own back navigation.
++ * The device and settings pages follow the system orientation, so in landscape
++ * they hide the dock instead of overlapping the content. The input page is
++ * landscape-only and draws its own toolbar, and the permission, activation,
++ * discovery, pairing and settings sub-pages are one-way flows that keep their
++ * own back navigation.
+  */
+ object DockVisibilityPolicy {
+ 
+diff --git a/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt b/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
+index 88a7be1..e7163c4 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/views/keyboard/AdvancedKeyboard.kt
+@@ -408,7 +408,7 @@ private fun CapsLockKeyCell(
+                     )
+             )
+             AdaptiveText(
+-                text = stringResource(id = R.string.caps_lock),
++                text = stringResource(id = R.string.mac_caps),
+                 percent = 0.55f,
+                 modifier = Modifier.fillMaxWidth()
+             )
+diff --git a/app/src/main/java/com/atharok/btremote/ui/views/mouse/MacTrackpad.kt b/app/src/main/java/com/atharok/btremote/ui/views/mouse/MacTrackpad.kt
+index fba2129..5c8ef80 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/views/mouse/MacTrackpad.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/views/mouse/MacTrackpad.kt
+@@ -58,6 +58,9 @@ fun MacTrackpad(
+     val density = LocalDensity.current
+     val thresholds = remember(density) { density.gestureThresholds() }
+     val longPressScope = rememberCoroutineScope()
++    // The recognizer is keyed on the settings, so this flag is refreshed
++    // whenever the user toggles long-press drag and pointerInput restarts.
++    val longPressDragEnabled = trackpadSettings.longPressDragEnabled
+     val recognizer = remember(
+         trackpadSettings,
+         shouldInvertMouseScrollingDirection,
+@@ -129,9 +132,12 @@ fun MacTrackpad(
+                             // decides: one touch, under the 8 dp allowance, not
+                             // already dragging. A second finger moves the sequence to
+                             // two-finger mode and the timeout then does nothing.
+-                            longPressJob = longPressScope.launch {
+-                                delay(LONG_PRESS_DELAY_MILLIS)
+-                                execute(recognizer.onLongPressTimeout())
++                            // With the setting off no timer is created at all.
++                            if (longPressDragEnabled) {
++                                longPressJob = longPressScope.launch {
++                                    delay(LONG_PRESS_DELAY_MILLIS)
++                                    execute(recognizer.onLongPressTimeout())
++                                }
+                             }
+ 
+                             while (true) {
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 161db67..0b557f0 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -241,6 +241,13 @@
+     <string name="ctrl">Ctrl</string>
+     <string name="alt">Alt</string>
+     <string name="alt_gr">Alt Gr</string>
++
++    <!-- Mac key caps: hardware legends, kept language independent like the printed caps. -->
++    <string name="mac_ctrl" translatable="false">Ctrl</string>
++    <string name="mac_opt" translatable="false">Opt</string>
++    <string name="mac_cmd" translatable="false">Cmd</string>
++    <string name="mac_caps" translatable="false">Caps</string>
++    <string name="mac_space" translatable="false">Space</string>
+     <string name="page_up">Page Up</string>
+     <string name="page_down">Page Down</string>
+ 
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
+index ad99cba..547d00a 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutFactoryTest.kt
+@@ -1,8 +1,11 @@
+ package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
+ 
+ import android.content.ContextWrapper
++import com.atharok.btremote.R
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.EnglishUSAdvancedKeyboardLayout
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.IconAdvancedKeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.ResourceTextAdvancedKeyboardKey
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertNotNull
+ import org.junit.Assert.assertTrue
+@@ -140,4 +143,35 @@ class MacKeyboardLayoutFactoryTest {
+         assertTrue(KeyboardKey.KEY_PRINT_SCREEN.byte !in bytes)
+         assertTrue(KeyboardKey.KEY_DELETE_FORWARD.byte !in bytes)
+     }
++
++    @Test
++    fun bottomRowKeepsTheMacLegendsAndTheAltGrUsage() {
++        val row = layout.rows[5]
++
++        assertEquals(
++            listOf(
++                R.string.mac_ctrl,
++                R.string.mac_opt,
++                R.string.mac_cmd,
++                R.string.mac_space,
++                R.string.mac_cmd,
++                R.string.mac_opt
++            ),
++            row.keys.take(6).map { (it.key as ResourceTextAdvancedKeyboardKey).textRes }
++        )
++        assertEquals(KeyboardKey.KEY_ALT_GR.byte, row.keys[5].byte)
++        assertEquals(14.5f, row.totalWeight, 0.001f)
++    }
++
++    @Test
++    fun tabAndEnterKeepTheirLegendsInTheAssembledLayout() {
++        assertEquals(
++            R.string.keyboard_tab,
++            (layout.rows[2].keys.first().key as IconAdvancedKeyboardKey).trailingTextRes
++        )
++        assertEquals(
++            R.string.enter,
++            (layout.rows[3].keys.last().key as IconAdvancedKeyboardKey).trailingTextRes
++        )
++    }
+ }
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt
+index d4d2dce..b066081 100644
+--- a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/keyboard/mac/MacKeyboardLayoutTest.kt
+@@ -1,7 +1,11 @@
+ package com.atharok.btremote.domain.entities.remoteInput.keyboard.mac
+ 
++import androidx.compose.ui.text.style.TextAlign
++import com.atharok.btremote.R
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardKey
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.AdvancedKeyBehavior
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.IconAdvancedKeyboardKey
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.ResourceTextAdvancedKeyboardKey
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.advancedKeyboard.TextAdvancedKeyboardKey
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertNotNull
+@@ -170,6 +174,57 @@ class MacKeyboardLayoutTest {
+         )
+     }
+ 
++    @Test
++    fun bottomRowPrintsTheMacHardwareLegends() {
++        val row = MacKeyboardSpec.bottomRow
++
++        assertEquals(
++            listOf(
++                R.string.mac_ctrl,
++                R.string.mac_opt,
++                R.string.mac_cmd,
++                R.string.mac_space,
++                R.string.mac_cmd,
++                R.string.mac_opt
++            ),
++            row.keys.take(6).map { (it.key as ResourceTextAdvancedKeyboardKey).textRes }
++        )
++        assertEquals(14.5f, row.totalWeight, 0.001f)
++    }
++
++    @Test
++    fun rightOptionKeepsTheAltGrUsageUnderTheOptLegend() {
++        val key = MacKeyboardSpec.optionRight
++        val cap = key.key as ResourceTextAdvancedKeyboardKey
++
++        assertEquals(KeyboardKey.KEY_ALT_GR.byte, key.byte)
++        assertEquals(R.string.mac_opt, cap.textRes)
++        assertEquals(TextAlign.End, cap.textAlign)
++    }
++
++    @Test
++    fun capsLockPrintsTheCapsLegend() {
++        assertEquals(
++            R.string.mac_caps,
++            (MacKeyboardSpec.capsLock.key as ResourceTextAdvancedKeyboardKey).textRes
++        )
++    }
++
++    @Test
++    fun tabAndEnterShowTheirLegendNextToTheIcon() {
++        assertEquals(
++            R.string.keyboard_tab,
++            (MacKeyboardSpec.tab.key as IconAdvancedKeyboardKey).trailingTextRes
++        )
++        assertEquals(
++            R.string.enter,
++            (MacKeyboardSpec.enter.key as IconAdvancedKeyboardKey).trailingTextRes
++        )
++        assertNull(
++            (MacKeyboardSpec.backspace.key as IconAdvancedKeyboardKey).trailingTextRes
++        )
++    }
++
+     @Test
+     fun upAndDownShareOneUnitColumn() {
+         val cell = MacKeyboardSpec.upDownColumn
+diff --git a/app/src/test/java/com/atharok/btremote/ui/navigation/AppOrientationPolicyTest.kt b/app/src/test/java/com/atharok/btremote/ui/navigation/AppOrientationPolicyTest.kt
+index d825656..8fe957e 100644
+--- a/app/src/test/java/com/atharok/btremote/ui/navigation/AppOrientationPolicyTest.kt
++++ b/app/src/test/java/com/atharok/btremote/ui/navigation/AppOrientationPolicyTest.kt
+@@ -6,23 +6,31 @@ import org.junit.Test
+ class AppOrientationPolicyTest {
+ 
+     @Test
+-    fun onlyTheInputDestinationIsLandscape() {
++    fun onlyTheInputDestinationPinsLandscape() {
+         assertEquals(
+             AppScreenOrientation.LANDSCAPE,
+             AppOrientationPolicy.orientationFor(AppNavDestination.InputDestination.route)
+         )
+-        assertEquals(
+-            AppScreenOrientation.PORTRAIT,
+-            AppOrientationPolicy.orientationFor(AppNavDestination.DeviceSelectionDestination.route)
+-        )
+-        assertEquals(
+-            AppScreenOrientation.PORTRAIT,
+-            AppOrientationPolicy.orientationFor(AppNavDestination.SettingsDestination.route)
+-        )
+-        assertEquals(
+-            AppScreenOrientation.PORTRAIT,
+-            AppOrientationPolicy.orientationFor(AppNavDestination.BluetoothPermissionsDestination.route)
+-        )
+-        assertEquals(AppScreenOrientation.PORTRAIT, AppOrientationPolicy.orientationFor(null))
++    }
++
++    @Test
++    fun everyOtherDestinationFollowsTheSystemOrientation() {
++        listOf(
++            AppNavDestination.DeviceSelectionDestination.route,
++            AppNavDestination.SettingsDestination.route,
++            AppNavDestination.BluetoothPermissionsDestination.route,
++            AppNavDestination.BluetoothActivationDestination.route,
++            AppNavDestination.DeviceDiscoveryDestination.route,
++            AppNavDestination.DistantDevicePairDestination.route,
++            AppNavDestination.TrackpadGestureSettingsDestination.route,
++            AppNavDestination.ThirdLibrariesDestination.route,
++            null
++        ).forEach { route ->
++            assertEquals(
++                "$route",
++                AppScreenOrientation.UNSPECIFIED,
++                AppOrientationPolicy.orientationFor(route)
++            )
++        }
+     }
+ }
+-- 
+2.49.0
+

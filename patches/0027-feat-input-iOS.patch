@@ -1,0 +1,768 @@
+From c10eb0df288e69558ad341f3f8952ab9a7890d1f Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 01:10:16 +0800
+Subject: [PATCH 27/33] =?UTF-8?q?feat(input):=20=E5=AF=B9=E9=BD=90=20iOS?=
+ =?UTF-8?q?=20=E6=A8=AA=E5=B1=8F=E8=BE=93=E5=85=A5=E5=B7=A5=E5=85=B7?=
+ =?UTF-8?q?=E6=A0=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 输入页改为独立工具栏：居中分段切换与 44dp 菜单，仅保留连接和设置
+- 导航目的地集中监听方向，输入页横屏、其余页面竖屏
+- 未连接时停留输入页并显示打开连接页状态，移除断线强制回设备页
+- 页面切换、菜单、返回、断线、前后台与销毁前统一释放键盘和指针
+---
+ app/src/main/AndroidManifest.xml              |   1 +
+ .../atharok/btremote/ui/app/BtRemoteApp.kt    |  64 +++-
+ .../ui/navigation/AppOrientationPolicy.kt     |  28 ++
+ .../btremote/ui/screens/InputScreen.kt        | 343 ++++++++++++------
+ app/src/main/res/values-zh-rCN/strings.xml    |   5 +
+ app/src/main/res/values/strings.xml           |   5 +
+ .../ui/navigation/AppOrientationPolicyTest.kt |  28 ++
+ 7 files changed, 352 insertions(+), 122 deletions(-)
+ create mode 100644 app/src/main/java/com/atharok/btremote/ui/navigation/AppOrientationPolicy.kt
+ create mode 100644 app/src/test/java/com/atharok/btremote/ui/navigation/AppOrientationPolicyTest.kt
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index db169b1..71eb68e 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -65,6 +65,7 @@
+         <activity
+             android:name=".presentation.activities.MainActivity"
+             android:exported="true"
++            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+             android:windowSoftInputMode="adjustResize"
+             android:theme="@style/Theme.BTRemote">
+             <intent-filter>
+diff --git a/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt b/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
+index 30e9998..2de729d 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/app/BtRemoteApp.kt
+@@ -1,6 +1,7 @@
+ package com.atharok.btremote.ui.app
+ 
+-import android.bluetooth.BluetoothHidDevice
++import android.content.pm.ActivityInfo
++import android.content.res.Configuration
+ import android.content.Context
+ import androidx.compose.foundation.layout.WindowInsets
+ import androidx.compose.foundation.layout.displayCutout
+@@ -17,10 +18,12 @@ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberUpdatedState
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalConfiguration
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import androidx.navigation.NavHostController
++import androidx.navigation.compose.currentBackStackEntryAsState
+ import androidx.navigation.compose.rememberNavController
+ import com.atharok.btremote.common.extensions.getActivity
+ import com.atharok.btremote.common.utils.arePermissionsGranted
+@@ -32,11 +35,17 @@ import com.atharok.btremote.domain.entities.settings.AppearanceSettings
+ import com.atharok.btremote.domain.entities.settings.ConnectionSettings
+ import com.atharok.btremote.presentation.services.BluetoothHidService
+ import com.atharok.btremote.presentation.viewmodel.AppScopeViewModel
++import com.atharok.btremote.ui.components.AppDock
+ import com.atharok.btremote.ui.components.CheckBluetoothStateChanged
+ import com.atharok.btremote.ui.components.OnLifecycleEvent
++import com.atharok.btremote.ui.navigation.AppMainTab
+ import com.atharok.btremote.ui.navigation.AppNavDestination
+ import com.atharok.btremote.ui.navigation.AppNavHost
++import com.atharok.btremote.ui.navigation.AppOrientationPolicy
++import com.atharok.btremote.ui.navigation.AppScreenOrientation
++import com.atharok.btremote.ui.navigation.DockVisibilityPolicy
+ import com.atharok.btremote.ui.navigation.navigateTo
++import com.atharok.btremote.ui.navigation.navigateToMainTab
+ import com.atharok.btremote.ui.screens.BluetoothActivationScreen
+ import com.atharok.btremote.ui.screens.BluetoothNotSupportScreen
+ import com.atharok.btremote.ui.screens.BluetoothPermissionsScreen
+@@ -70,6 +79,26 @@ fun BtRemoteApp(
+         connectionSettings?.disconnectOnBackground ?: true
+     )
+ 
++    val backStackEntry by navController.currentBackStackEntryAsState()
++    val currentRoute = backStackEntry?.destination?.route
++    val configuration = LocalConfiguration.current
++    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
++    val showsDock = DockVisibilityPolicy.showsDock(isLandscape, currentRoute)
++    val selectedMainTab = when (currentRoute) {
++        AppMainTab.SETTINGS.route -> AppMainTab.SETTINGS
++        else -> AppMainTab.CONNECT
++    }
++    val activity = context.getActivity()
++
++    // One listener drives the window orientation for every destination, so the
++    // pages never race each other with their own DisposableEffect requests.
++    LaunchedEffect(activity, currentRoute) {
++        activity?.requestedOrientation = when (AppOrientationPolicy.orientationFor(currentRoute)) {
++            AppScreenOrientation.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
++            AppScreenOrientation.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
++        }
++    }
++
+     BtRemoteTheme(
+         appearance = appearance
+     ) {
+@@ -101,17 +130,8 @@ fun BtRemoteApp(
+                     }
+                 }
+ 
+-                LaunchedEffect(bluetoothDeviceHidConnectionState) {
+-                    if(bluetoothDeviceHidConnectionState.state == BluetoothHidDevice.STATE_DISCONNECTED &&
+-                        navController.currentDestination?.route != AppNavDestination.DeviceSelectionDestination.route &&
+-                        navController.currentDestination?.route != AppNavDestination.DeviceDiscoveryDestination.route
+-                        ) {
+-                        navController.popBackStack(
+-                            route = AppNavDestination.DeviceSelectionDestination.route,
+-                            inclusive = false
+-                        )
+-                    }
+-                }
++                // A lost host is not a navigation event any more: the input page
++                // stays where it is and draws its own not-connected state.
+ 
+                 val disconnectCompletely = {
+                     appScopeViewModel.disconnectCompletely {
+@@ -160,6 +180,14 @@ fun BtRemoteApp(
+                             navigateToTrackpadGestureSettingsScreen = {
+                                 navController.navigateTo(AppNavDestination.TrackpadGestureSettingsDestination.route)
+                             },
++                            bottomBar = {
++                                if (showsDock) {
++                                    AppDock(
++                                        selectedTab = selectedMainTab,
++                                        onSelectTab = { navController.navigateToMainTab(it) }
++                                    )
++                                }
++                            },
+                             modifier = Modifier
+                         )
+                     },
+@@ -210,6 +238,14 @@ fun BtRemoteApp(
+                             startHidService = { explicitAddress ->
+                                 BluetoothHidService.start(context, explicitAddress)
+                             },
++                            bottomBar = {
++                                if (showsDock) {
++                                    AppDock(
++                                        selectedTab = selectedMainTab,
++                                        onSelectTab = { navController.navigateToMainTab(it) }
++                                    )
++                                }
++                            },
+                             modifier = Modifier
+                         )
+                     },
+@@ -245,7 +281,9 @@ fun BtRemoteApp(
+                     inputScreen = {
+                         InputScreen(
+                             bluetoothDeviceHidConnectionState = bluetoothDeviceHidConnectionState,
+-                            closeApp = { context.getActivity()?.moveTaskToBack(true) },
++                            navigateToDeviceSelection = {
++                                navController.navigateToMainTab(AppMainTab.CONNECT)
++                            },
+                             navigateToSettings = navigateToSettings,
+                             modifier = Modifier
+                         )
+diff --git a/app/src/main/java/com/atharok/btremote/ui/navigation/AppOrientationPolicy.kt b/app/src/main/java/com/atharok/btremote/ui/navigation/AppOrientationPolicy.kt
+new file mode 100644
+index 0000000..5804056
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/ui/navigation/AppOrientationPolicy.kt
+@@ -0,0 +1,28 @@
++package com.atharok.btremote.ui.navigation
++
++/** The orientation a destination asks the window to take. */
++enum class AppScreenOrientation {
++    LANDSCAPE,
++    PORTRAIT
++}
++
++/**
++ * Central orientation policy for the whole navigation graph.
++ *
++ * The keyboard and the trackpad need the long edge, so the input destination is
++ * landscape. Setup and Settings are portrait pages; keeping them portrait means
++ * opening either one from the input page asks the system to turn the device back
++ * instead of leaving a landscape page with no dock.
++ *
++ * Every destination that is not the input page is portrait, including the
++ * permission, activation, discovery and pairing pages.
++ */
++object AppOrientationPolicy {
++
++    fun orientationFor(route: String?): AppScreenOrientation =
++        if (route == AppNavDestination.InputDestination.route) {
++            AppScreenOrientation.LANDSCAPE
++        } else {
++            AppScreenOrientation.PORTRAIT
++        }
++}
+diff --git a/app/src/main/java/com/atharok/btremote/ui/screens/InputScreen.kt b/app/src/main/java/com/atharok/btremote/ui/screens/InputScreen.kt
+index 7bb54ae..3cd2f77 100644
+--- a/app/src/main/java/com/atharok/btremote/ui/screens/InputScreen.kt
++++ b/app/src/main/java/com/atharok/btremote/ui/screens/InputScreen.kt
+@@ -8,17 +8,27 @@ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+-import androidx.compose.foundation.layout.RowScope
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.WindowInsets
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.systemBars
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.layout.widthIn
++import androidx.compose.foundation.layout.windowInsetsPadding
+ import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.Button
++import androidx.compose.material3.DropdownMenu
++import androidx.compose.material3.DropdownMenuItem
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
+@@ -27,9 +37,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.vector.ImageVector
+ import androidx.compose.ui.platform.LocalContext
+-import androidx.compose.ui.res.dimensionResource
+ import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.dp
+ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+@@ -37,18 +50,16 @@ import com.atharok.btremote.R
+ import com.atharok.btremote.common.utils.AppIcons
+ import com.atharok.btremote.domain.entities.DeviceHidConnectionState
+ import com.atharok.btremote.domain.entities.remoteInput.InputReleaseCoordinator
++import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLedState
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardReportState
+ import com.atharok.btremote.domain.entities.settings.HapticSettings
+ import com.atharok.btremote.domain.entities.settings.InputPage
+ import com.atharok.btremote.domain.entities.settings.RemoteSettings
+ import com.atharok.btremote.domain.entities.settings.TrackpadSettings
+ import com.atharok.btremote.presentation.haptics.AndroidHapticFeedbackController
+-import com.atharok.btremote.presentation.services.BluetoothHidService
+ import com.atharok.btremote.presentation.viewmodel.RemoteViewModel
+-import com.atharok.btremote.ui.components.AppScaffold
+-import com.atharok.btremote.ui.components.BasicIconButton
+-import com.atharok.btremote.ui.components.LoadingDialog
+ import com.atharok.btremote.ui.components.OnLifecycleEvent
++import com.atharok.btremote.ui.components.TextNormal
+ import com.atharok.btremote.ui.haptics.HapticFeedbackProvider
+ import com.atharok.btremote.ui.haptics.LocalHapticActions
+ import com.atharok.btremote.ui.views.keyboard.AdvancedKeyboard
+@@ -56,15 +67,18 @@ import com.atharok.btremote.ui.views.mouse.TrackpadPage
+ import org.koin.androidx.compose.koinViewModel
+ 
+ /**
+- * The input screen: one full-screen MacBook keyboard and one full-screen
+- * trackpad, with the page switch pinned to the bottom. The selected page is
+- * persisted, and every interruption path runs the shared release coordinator
+- * before the page changes or the screen goes away.
++ * The input page: one full-screen MacBook keyboard and one full-screen
++ * trackpad, with the page switch in a toolbar of its own above the content.
++ *
++ * The page owns the release coordinator, so leaving the page, leaving the app,
++ * losing the host or losing the HID service all release keyboard and pointer
++ * state through the same idempotent path. When the host is not connected the
++ * page stays put and offers the connection page instead of being popped away.
+  */
+ @Composable
+ fun InputScreen(
+     bluetoothDeviceHidConnectionState: DeviceHidConnectionState,
+-    closeApp: () -> Unit,
++    navigateToDeviceSelection: () -> Unit,
+     navigateToSettings: () -> Unit,
+     modifier: Modifier = Modifier,
+     remoteViewModel: RemoteViewModel = koinViewModel(),
+@@ -76,6 +90,8 @@ fun InputScreen(
+         .trackpadSettingsFlow.collectAsStateWithLifecycle(TrackpadSettings())
+     val hapticSettings by remoteViewModel
+         .hapticSettingsFlow.collectAsStateWithLifecycle(HapticSettings())
++    val keyboardLedState by remoteViewModel
++        .keyboardLedState.collectAsStateWithLifecycle(KeyboardLedState.EMPTY)
+     val hapticController = remember { AndroidHapticFeedbackController.from(context) }
+ 
+     val releaseCoordinator = remember { InputReleaseCoordinator() }
+@@ -88,16 +104,27 @@ fun InputScreen(
+         ?.let(InputPage::fromPersistedValue)
+         ?: remoteSettings.inputPage
+ 
++    val isConnected = bluetoothDeviceHidConnectionState.state == BluetoothHidDevice.STATE_CONNECTED
++
++    fun releaseAll() = releaseCoordinator.releaseAll()
++
++    // Release before navigating: the next page must not inherit a held key or a
++    // held pointer button.
++    fun navigate(action: () -> Unit) {
++        releaseAll()
++        action()
++    }
++
+     fun selectPage(page: InputPage) {
+         if (page == selectedPage) return
+-        // Release before the page changes: the next page must not inherit a held
+-        // key, a pointer button or a live two-finger gesture.
+-        releaseCoordinator.releaseAll()
++        releaseAll()
+         selectedPageValue = page.persistedValue
+         remoteViewModel.saveInputPage(page)
+     }
+ 
+-    BackHandler(enabled = true, onBack = closeApp)
++    BackHandler(enabled = true) {
++        navigate(navigateToDeviceSelection)
++    }
+ 
+     LaunchedEffect(selectedPageValue, remoteSettings.inputPage) {
+         if (selectedPageValue == remoteSettings.inputPage.persistedValue) {
+@@ -106,38 +133,46 @@ fun InputScreen(
+     }
+ 
+     LaunchedEffect(bluetoothDeviceHidConnectionState.state) {
+-        if (bluetoothDeviceHidConnectionState.state == BluetoothHidDevice.STATE_DISCONNECTED ||
+-            bluetoothDeviceHidConnectionState.state == BluetoothHidDevice.STATE_DISCONNECTING
+-        ) {
+-            releaseCoordinator.releaseAll()
++        if (bluetoothDeviceHidConnectionState.state != BluetoothHidDevice.STATE_CONNECTED) {
++            releaseAll()
+         }
+     }
+ 
+     OnLifecycleEvent { _, event ->
+         if (event == Lifecycle.Event.ON_STOP) {
+-            releaseCoordinator.releaseAll()
++            releaseAll()
+         }
+     }
+ 
++    DisposableEffect(releaseCoordinator) {
++        onDispose { releaseCoordinator.releaseAll() }
++    }
++
+     HapticFeedbackProvider(
+         controller = hapticController,
+         settings = hapticSettings
+     ) {
+-        AppScaffold(
+-            title = bluetoothDeviceHidConnectionState.deviceName,
+-            modifier = modifier,
+-            topBarActions = {
+-                TopBarActions(
+-                    navigateToSettings = navigateToSettings,
+-                    disconnectDevice = { remoteViewModel.disconnectDevice() }
+-                )
+-            }
+-        ) { innerPadding ->
++        if (!isConnected) {
++            NotConnectedView(
++                modifier = modifier,
++                onOpenConnection = { navigate(navigateToDeviceSelection) }
++            )
++        } else {
++            // Edge-to-edge is on, and the nav host only pads the cutout. The
++            // input page pads itself so the bottom row of keys, the trackpad
++            // and the toolbar stay out of the status and gesture bars.
+             Column(
+-                modifier = Modifier
++                modifier = modifier
+                     .fillMaxSize()
+-                    .padding(innerPadding)
++                    .windowInsetsPadding(WindowInsets.systemBars)
+             ) {
++                InputToolbar(
++                    selectedPage = selectedPage,
++                    onSelectPage = ::selectPage,
++                    onConnect = { navigate(navigateToDeviceSelection) },
++                    onSettings = { navigate(navigateToSettings) }
++                )
++
+                 Box(
+                     modifier = Modifier
+                         .weight(1f)
+@@ -149,12 +184,10 @@ fun InputScreen(
+                                 reportState = keyboardReportState,
+                                 sendKeyboardKeyReport = remoteViewModel.sendKeyboardReport,
+                                 releaseCoordinator = releaseCoordinator,
++                                capsLockOn = keyboardLedState.capsLock,
+                                 modifier = Modifier
+                                     .fillMaxSize()
+-                                    .padding(
+-                                        horizontal = dimensionResource(id = R.dimen.padding_small),
+-                                        vertical = dimensionResource(id = R.dimen.padding_min)
+-                                    )
++                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                             )
+                         }
+ 
+@@ -167,71 +200,71 @@ fun InputScreen(
+                                 releaseCoordinator = releaseCoordinator,
+                                 modifier = Modifier
+                                     .fillMaxSize()
+-                                    .padding(
+-                                        horizontal = dimensionResource(id = R.dimen.padding_small),
+-                                        vertical = dimensionResource(id = R.dimen.padding_min)
+-                                    )
++                                    .padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 10.dp)
+                             )
+                         }
+                     }
+                 }
+-
+-                InputPageSwitcher(
+-                    selectedPage = selectedPage,
+-                    onSelect = ::selectPage
+-                )
+             }
+         }
+     }
+-
+-    if (bluetoothDeviceHidConnectionState.state == BluetoothHidDevice.STATE_DISCONNECTING) {
+-        LoadingDialog(
+-            title = stringResource(id = R.string.connection),
+-            message = stringResource(
+-                id = R.string.bluetooth_device_disconnecting_message,
+-                bluetoothDeviceHidConnectionState.deviceName
+-            ),
+-            buttonText = stringResource(id = R.string.disconnect),
+-            onButtonClick = {
+-                remoteViewModel.disconnectDevice()
+-                BluetoothHidService.stop(context) // force disconnection
+-            }
+-        )
+-    }
+ }
+ 
++/**
++ * The toolbar is a row of its own rather than an overlay: the switch and the
++ * menu must never sit on top of a key cap or the trackpad surface.
++ *
++ * The 44dp placeholder on the left balances the 44dp menu on the right, so the
++ * page switch is centred on the screen and not on the remaining space.
++ */
+ @Composable
+-private fun RowScope.TopBarActions(
+-    navigateToSettings: () -> Unit,
+-    disconnectDevice: () -> Unit
++private fun InputToolbar(
++    selectedPage: InputPage,
++    onSelectPage: (InputPage) -> Unit,
++    onConnect: () -> Unit,
++    onSettings: () -> Unit
+ ) {
+-    BasicIconButton(
+-        onClick = disconnectDevice,
+-        icon = AppIcons.Disconnect,
+-        contentDescription = stringResource(id = R.string.disconnect)
+-    )
+-    BasicIconButton(
+-        onClick = navigateToSettings,
+-        icon = AppIcons.Settings,
+-        contentDescription = stringResource(id = R.string.settings)
+-    )
++    Row(
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(horizontal = 8.dp)
++            .padding(top = 4.dp, bottom = 6.dp),
++        verticalAlignment = Alignment.CenterVertically
++    ) {
++        Spacer(modifier = Modifier.width(44.dp))
++
++        Box(
++            modifier = Modifier.weight(1f),
++            contentAlignment = Alignment.Center
++        ) {
++            InputPageSwitcher(
++                selectedPage = selectedPage,
++                onSelectPage = onSelectPage,
++                modifier = Modifier
++                    .widthIn(max = 360.dp)
++                    .fillMaxWidth()
++            )
++        }
++
++        InputOverflowMenu(
++            onConnect = onConnect,
++            onSettings = onSettings,
++            modifier = Modifier.size(44.dp)
++        )
++    }
+ }
+ 
+ @Composable
+ private fun InputPageSwitcher(
+     selectedPage: InputPage,
+-    onSelect: (InputPage) -> Unit
++    onSelectPage: (InputPage) -> Unit,
++    modifier: Modifier = Modifier
+ ) {
+     val hapticActions = LocalHapticActions.current
+ 
+     Row(
+-        modifier = Modifier
+-            .fillMaxWidth()
+-            .padding(
+-                horizontal = dimensionResource(id = R.dimen.padding_normal),
+-                vertical = dimensionResource(id = R.dimen.padding_small)
+-            ),
+-        horizontalArrangement = Arrangement.spacedBy(dimensionResource(id = R.dimen.padding_min))
++        modifier = modifier,
++        horizontalArrangement = Arrangement.spacedBy(6.dp)
+     ) {
+         InputPage.entries.forEach { page ->
+             val selected = page == selectedPage
+@@ -246,45 +279,137 @@ private fun InputPageSwitcher(
+                 } else {
+                     MaterialTheme.colorScheme.onSurfaceVariant
+                 },
+-                shape = RoundedCornerShape(dimensionResource(id = R.dimen.card_corner_radius)),
++                shape = RoundedCornerShape(8.dp),
+                 modifier = Modifier
+                     .weight(1f)
+-                    .height(44.dp)
++                    .height(40.dp)
+             ) {
+-                Box(
++                Row(
+                     modifier = Modifier
+                         .fillMaxSize()
+                         .clickable {
+                             hapticActions.keyboardTap()
+-                            onSelect(page)
++                            onSelectPage(page)
+                         },
+-                    contentAlignment = Alignment.Center
++                    horizontalArrangement = Arrangement.Center,
++                    verticalAlignment = Alignment.CenterVertically
+                 ) {
+-                    Row(
+-                        horizontalArrangement = Arrangement.spacedBy(
+-                            dimensionResource(id = R.dimen.padding_min)
+-                        ),
+-                        verticalAlignment = Alignment.CenterVertically
+-                    ) {
+-                        Icon(
+-                            imageVector = when (page) {
+-                                InputPage.KEYBOARD -> AppIcons.Keyboard
+-                                InputPage.TRACKPAD -> AppIcons.Mouse
+-                            },
+-                            contentDescription = null
+-                        )
+-                        Text(
+-                            text = stringResource(
+-                                id = when (page) {
+-                                    InputPage.KEYBOARD -> R.string.keyboard
+-                                    InputPage.TRACKPAD -> R.string.touchpad
+-                                }
+-                            ),
+-                            style = MaterialTheme.typography.labelLarge
+-                        )
+-                    }
++                    Icon(
++                        imageVector = page.icon(),
++                        contentDescription = null,
++                        modifier = Modifier.size(16.dp)
++                    )
++                    Spacer(modifier = Modifier.width(4.dp))
++                    Text(
++                        text = stringResource(id = page.labelRes()),
++                        style = MaterialTheme.typography.labelLarge,
++                        maxLines = 1
++                    )
+                 }
+             }
+         }
+     }
+ }
++
++/**
++ * Setup and Settings are the only entries: the input page is already the
++ * current page, so offering it back would be a no-op.
++ */
++@Composable
++private fun InputOverflowMenu(
++    onConnect: () -> Unit,
++    onSettings: () -> Unit,
++    modifier: Modifier = Modifier
++) {
++    var expanded by remember { mutableStateOf(false) }
++
++    Box(modifier = modifier) {
++        Box(
++            modifier = Modifier
++                .fillMaxSize()
++                .clip(RoundedCornerShape(percent = 50))
++                .clickable { expanded = true },
++            contentAlignment = Alignment.Center
++        ) {
++            Icon(
++                imageVector = AppIcons.MoreVert,
++                contentDescription = stringResource(id = R.string.more_actions)
++            )
++        }
++
++        DropdownMenu(
++            expanded = expanded,
++            onDismissRequest = { expanded = false }
++        ) {
++            DropdownMenuItem(
++                text = { TextNormal(text = stringResource(id = R.string.connection)) },
++                leadingIcon = {
++                    Icon(imageVector = AppIcons.Bluetooth, contentDescription = null)
++                },
++                onClick = {
++                    expanded = false
++                    onConnect()
++                }
++            )
++            DropdownMenuItem(
++                text = { TextNormal(text = stringResource(id = R.string.settings)) },
++                leadingIcon = {
++                    Icon(imageVector = AppIcons.Settings, contentDescription = null)
++                },
++                onClick = {
++                    expanded = false
++                    onSettings()
++                }
++            )
++        }
++    }
++}
++
++@Composable
++private fun NotConnectedView(
++    onOpenConnection: () -> Unit,
++    modifier: Modifier = Modifier
++) {
++    Column(
++        modifier = modifier
++            .fillMaxSize()
++            .windowInsetsPadding(WindowInsets.systemBars)
++            .padding(40.dp),
++        horizontalAlignment = Alignment.CenterHorizontally,
++        verticalArrangement = Arrangement.Center
++    ) {
++        Icon(
++            imageVector = AppIcons.Keyboard,
++            contentDescription = null,
++            modifier = Modifier.size(56.dp),
++            tint = MaterialTheme.colorScheme.onSurfaceVariant
++        )
++        Spacer(modifier = Modifier.height(16.dp))
++        Text(
++            text = stringResource(id = R.string.input_not_connected_title),
++            style = MaterialTheme.typography.titleLarge,
++            fontWeight = FontWeight.SemiBold
++        )
++        Spacer(modifier = Modifier.height(8.dp))
++        Text(
++            text = stringResource(id = R.string.input_not_connected_message),
++            style = MaterialTheme.typography.bodyMedium,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            textAlign = TextAlign.Center
++        )
++        Spacer(modifier = Modifier.height(16.dp))
++        Button(onClick = onOpenConnection) {
++            Text(text = stringResource(id = R.string.open_connection_page))
++        }
++    }
++}
++
++private fun InputPage.icon(): ImageVector = when (this) {
++    InputPage.KEYBOARD -> AppIcons.Keyboard
++    InputPage.TRACKPAD -> AppIcons.Mouse
++}
++
++private fun InputPage.labelRes(): Int = when (this) {
++    InputPage.KEYBOARD -> R.string.keyboard
++    InputPage.TRACKPAD -> R.string.touchpad
++}
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index 8e94a55..2eb8dda 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -53,6 +53,11 @@
+     <string name="website">网站</string>
+     <string name="source_code">源代码</string>
+     <string name="keyboard">键盘</string>
++    <string name="input">输入</string>
++    <string name="input_not_connected_title">未连接</string>
++    <string name="input_not_connected_message">连接设备后即可使用键盘和触控板。</string>
++    <string name="open_connection_page">打开连接页</string>
++    <string name="more_actions">更多操作</string>
+     <string name="keyboard_language">键盘语言</string>
+     <string name="keyboard_english_us">英语（美国）</string>
+     <string name="keyboard_english_uk">英语（英国）</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index e416e32..161db67 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -202,6 +202,11 @@
+ 
+     <!-- Keyboard -->
+     <string name="keyboard">Keyboard</string>
++    <string name="input">Input</string>
++    <string name="input_not_connected_title">Not connected</string>
++    <string name="input_not_connected_message">Connect to a device to use the keyboard and trackpad.</string>
++    <string name="open_connection_page">Open connection page</string>
++    <string name="more_actions">More actions</string>
+     <string name="keyboard_language">Keyboard language</string>
+     <string name="keyboard_language_info">Ensure that the selected keyboard language matches the one configured on the remote device.</string>
+     <string name="advanced_keyboard">Advanced keyboard</string>
+diff --git a/app/src/test/java/com/atharok/btremote/ui/navigation/AppOrientationPolicyTest.kt b/app/src/test/java/com/atharok/btremote/ui/navigation/AppOrientationPolicyTest.kt
+new file mode 100644
+index 0000000..d825656
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/ui/navigation/AppOrientationPolicyTest.kt
+@@ -0,0 +1,28 @@
++package com.atharok.btremote.ui.navigation
++
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++class AppOrientationPolicyTest {
++
++    @Test
++    fun onlyTheInputDestinationIsLandscape() {
++        assertEquals(
++            AppScreenOrientation.LANDSCAPE,
++            AppOrientationPolicy.orientationFor(AppNavDestination.InputDestination.route)
++        )
++        assertEquals(
++            AppScreenOrientation.PORTRAIT,
++            AppOrientationPolicy.orientationFor(AppNavDestination.DeviceSelectionDestination.route)
++        )
++        assertEquals(
++            AppScreenOrientation.PORTRAIT,
++            AppOrientationPolicy.orientationFor(AppNavDestination.SettingsDestination.route)
++        )
++        assertEquals(
++            AppScreenOrientation.PORTRAIT,
++            AppOrientationPolicy.orientationFor(AppNavDestination.BluetoothPermissionsDestination.route)
++        )
++        assertEquals(AppScreenOrientation.PORTRAIT, AppOrientationPolicy.orientationFor(null))
++    }
++}
+-- 
+2.49.0
+

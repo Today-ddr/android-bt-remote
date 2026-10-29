@@ -1,0 +1,282 @@
+From b0a6db523e5e7d088c80893b06e1fa9f4e5e525b Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 01:25:21 +0800
+Subject: [PATCH 33/33] =?UTF-8?q?fix(hid):=20=E5=9B=9E=E5=A4=8D=E5=AE=BF?=
+ =?UTF-8?q?=E4=B8=BB=20SET=5FREPORT=20=E8=AF=B7=E6=B1=82?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- onSetReport 更新 LED 状态后调用 replyReport，类型、ID 或 data 无效时调用
+  reportError(ERROR_RSP_UNSUPPORTED_REQ)，不再静默返回导致宿主阻塞。
+- onGetReport 对不支持的类型或报告 ID 同样回复 reportError，权限或 device
+  不可用时才直接返回。
+- 抽出 internal HidReportSupport 承载支持矩阵（输出报告接受 LED ID 3 与兼容
+  ID 0，空 data 视为无效），并用 JVM 单测覆盖。
+---
+ .../btremote/common/utils/HidReportSupport.kt | 68 +++++++++++++++
+ .../data/bluetooth/BluetoothHidCore.kt        | 58 +++++++++----
+ .../common/utils/HidReportSupportTest.kt      | 82 +++++++++++++++++++
+ 3 files changed, 190 insertions(+), 18 deletions(-)
+ create mode 100644 app/src/main/java/com/atharok/btremote/common/utils/HidReportSupport.kt
+ create mode 100644 app/src/test/java/com/atharok/btremote/common/utils/HidReportSupportTest.kt
+
+diff --git a/app/src/main/java/com/atharok/btremote/common/utils/HidReportSupport.kt b/app/src/main/java/com/atharok/btremote/common/utils/HidReportSupport.kt
+new file mode 100644
+index 0000000..24a74b4
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/common/utils/HidReportSupport.kt
+@@ -0,0 +1,68 @@
++package com.atharok.btremote.common.utils
++
++/**
++ * Which host requests this app can answer, kept free of Android types so the
++ * support matrix can be unit tested without a device or a host.
++ *
++ * The report types are the HID spec values that `BluetoothHidDevice` also
++ * exposes (`REPORT_TYPE_INPUT` = 0x01, `REPORT_TYPE_OUTPUT` = 0x02).
++ */
++internal object HidReportSupport {
++
++    const val REPORT_TYPE_INPUT: Byte = 0x01
++    const val REPORT_TYPE_OUTPUT: Byte = 0x02
++
++    /**
++     * Some host stacks write the LED report unnumbered even though the
++     * descriptor gives it report ID 3, so both IDs are accepted on SET_REPORT.
++     */
++    const val UNNUMBERED_REPORT_ID: Int = 0
++
++    /**
++     * SET_REPORT is only valid for the keyboard LED output report: it is the
++     * only output report in the descriptor.
++     *
++     * An empty payload is rejected. The descriptor declares one data byte, so a
++     * zero-length report carries no LED state at all and cannot be parsed; the
++     * request is answered with an error instead of pretending it succeeded.
++     */
++    fun isSupportedSetReport(type: Byte, id: Byte, data: ByteArray?): Boolean {
++        val reportId = id.toInt()
++        return type == REPORT_TYPE_OUTPUT &&
++            (reportId == KEYBOARD_LED_REPORT_ID || reportId == UNNUMBERED_REPORT_ID) &&
++            data != null && data.isNotEmpty()
++    }
++
++    /**
++     * GET_REPORT is answerable for the reports this app actually produces: the
++     * last mouse or keyboard input report, and the current LED output state.
++     *
++     * Report ID 0 is not declared in the descriptor, so unlike SET_REPORT it is
++     * not accepted here; an undeclared ID cannot be requested by a conforming
++     * host.
++     */
++    fun supportedGetReport(type: Byte, id: Byte): HidGetReport? {
++        val reportId = id.toInt()
++        return when (type) {
++            REPORT_TYPE_INPUT -> when (reportId) {
++                MOUSE_REPORT_ID -> HidGetReport.MOUSE_INPUT
++                KEYBOARD_REPORT_ID -> HidGetReport.KEYBOARD_INPUT
++                else -> null
++            }
++
++            REPORT_TYPE_OUTPUT -> when (reportId) {
++                KEYBOARD_LED_REPORT_ID -> HidGetReport.KEYBOARD_LED
++                else -> null
++            }
++
++            else -> null
++        }
++    }
++}
++
++/** The report a GET_REPORT request resolves to, or none when it is unsupported. */
++internal enum class HidGetReport {
++    MOUSE_INPUT,
++    KEYBOARD_INPUT,
++    KEYBOARD_LED
++}
+diff --git a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+index 5414263..57ada63 100644
+--- a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
++++ b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+@@ -9,6 +9,8 @@ import android.bluetooth.BluetoothProfile
+ import android.bluetooth.BluetoothProfile.ServiceListener
+ import android.content.Context
+ import androidx.annotation.RequiresPermission
++import com.atharok.btremote.common.utils.HidGetReport
++import com.atharok.btremote.common.utils.HidReportSupport
+ import com.atharok.btremote.common.utils.KEYBOARD_LED_REPORT_ID
+ import com.atharok.btremote.common.utils.KEYBOARD_REPORT_ID
+ import com.atharok.btremote.common.utils.MOUSE_REPORT_ID
+@@ -156,13 +158,31 @@ class BluetoothHidCore(
+          * The host writes the keyboard LED output report here. Only the LED
+          * report carries state this app uses; Caps Lock is drawn from it instead
+          * of being latched on the phone.
++         *
++         * A SET_REPORT must be completed exactly once: the host waits for
++         * either replyReport() or reportError(). Returning silently leaves the
++         * host blocked, so any request that is not the LED report is answered
++         * with an error. Do not turn the error path back into a plain return.
+          */
++        @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+         override fun onSetReport(device: BluetoothDevice?, type: Byte, id: Byte, data: ByteArray?) {
+             super.onSetReport(device, type, id, data)
+-            if (type != BluetoothHidDevice.REPORT_TYPE_OUTPUT || data == null) return
+-            if (id.toInt() == KEYBOARD_LED_REPORT_ID || id.toInt() == 0) {
+-                _keyboardLedState.value = KeyboardLedState.fromOutputReport(data)
++            // Only a missing permission or HID device makes the request
++            // unanswerable; there is nothing to reply on in that case.
++            if (!checkBluetoothConnectPermission(context)) return
++            val hidDevice = bluetoothHidDevice ?: return
++            val target = device ?: bluetoothDevice ?: return
++
++            val ledReport = data?.takeIf { HidReportSupport.isSupportedSetReport(type, id, it) }
++            if (ledReport == null) {
++                hidDevice.reportError(target, BluetoothHidDevice.ERROR_RSP_UNSUPPORTED_REQ)
++                return
+             }
++
++            // Update the local state before acknowledging, so the Caps dot is
++            // already right when the host's write completes.
++            _keyboardLedState.value = KeyboardLedState.fromOutputReport(ledReport)
++            hidDevice.replyReport(target, type, id, ledReport)
+         }
+ 
+         /** Output reports that arrive on the interrupt channel take the same path. */
+@@ -177,28 +197,30 @@ class BluetoothHidCore(
+          * Minimal GET_REPORT support: the host may ask for the current input or
+          * LED state instead of waiting for the next report. Answering with the
+          * last report keeps that request from stalling the link.
++         *
++         * Like SET_REPORT, a GET_REPORT must be completed exactly once: an
++         * unsupported type or report ID gets reportError() rather than a silent
++         * return, which would leave the host waiting.
+          */
+         @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+         override fun onGetReport(device: BluetoothDevice?, type: Byte, id: Byte, bufferSize: Int) {
+             super.onGetReport(device, type, id, bufferSize)
+-            val report = when (type) {
+-                BluetoothHidDevice.REPORT_TYPE_INPUT -> when (id.toInt()) {
+-                    MOUSE_REPORT_ID -> lastMouseReport
+-                    KEYBOARD_REPORT_ID -> lastKeyboardReport
+-                    else -> null
+-                }
+-
+-                BluetoothHidDevice.REPORT_TYPE_OUTPUT -> when (id.toInt()) {
+-                    KEYBOARD_LED_REPORT_ID -> byteArrayOf(_keyboardLedState.value.byte)
+-                    else -> null
+-                }
+-
+-                else -> null
+-            } ?: return
+-
++            // Only a missing permission or HID device makes the request
++            // unanswerable; there is nothing to reply on in that case.
+             if (!checkBluetoothConnectPermission(context)) return
+             val hidDevice = bluetoothHidDevice ?: return
+             val target = device ?: bluetoothDevice ?: return
++
++            val report = when (HidReportSupport.supportedGetReport(type, id)) {
++                HidGetReport.MOUSE_INPUT -> lastMouseReport
++                HidGetReport.KEYBOARD_INPUT -> lastKeyboardReport
++                HidGetReport.KEYBOARD_LED -> byteArrayOf(_keyboardLedState.value.byte)
++                null -> {
++                    hidDevice.reportError(target, BluetoothHidDevice.ERROR_RSP_UNSUPPORTED_REQ)
++                    return
++                }
++            }
++
+             val data = if (bufferSize in 1 until report.size) {
+                 report.copyOf(bufferSize)
+             } else {
+diff --git a/app/src/test/java/com/atharok/btremote/common/utils/HidReportSupportTest.kt b/app/src/test/java/com/atharok/btremote/common/utils/HidReportSupportTest.kt
+new file mode 100644
+index 0000000..20cedc7
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/common/utils/HidReportSupportTest.kt
+@@ -0,0 +1,82 @@
++package com.atharok.btremote.common.utils
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/**
++ * Numeric literals are used on purpose: these are the values of
++ * `BluetoothHidDevice.REPORT_TYPE_*` and the report IDs, so the tests stay on
++ * the JVM without touching the Android SDK.
++ */
++class HidReportSupportTest {
++
++    private val outputType = 0x02.toByte()
++    private val inputType = 0x01.toByte()
++    private val featureType = 0x03.toByte()
++
++    private val ledByte = byteArrayOf(0x02)
++
++    // ---- SET_REPORT: keyboard LED output ----
++
++    @Test
++    fun supportsTheLedOutputReport() {
++        assertTrue(HidReportSupport.isSupportedSetReport(outputType, 0x03, ledByte))
++    }
++
++    @Test
++    fun supportsTheUnnumberedLedOutputReport() {
++        assertTrue(HidReportSupport.isSupportedSetReport(outputType, 0x00, ledByte))
++    }
++
++    @Test
++    fun supportsALedOutputReportThatCarriesTheReportIdFirst() {
++        assertTrue(HidReportSupport.isSupportedSetReport(outputType, 0x03, byteArrayOf(0x03, 0x02)))
++    }
++
++    @Test
++    fun rejectsEveryOtherReportType() {
++        assertFalse(HidReportSupport.isSupportedSetReport(inputType, 0x03, ledByte))
++        assertFalse(HidReportSupport.isSupportedSetReport(featureType, 0x03, ledByte))
++    }
++
++    @Test
++    fun rejectsTheWrongReportId() {
++        assertFalse(HidReportSupport.isSupportedSetReport(outputType, 0x01, ledByte))
++        assertFalse(HidReportSupport.isSupportedSetReport(outputType, 0x02, ledByte))
++        assertFalse(HidReportSupport.isSupportedSetReport(outputType, 0x04, ledByte))
++    }
++
++    @Test
++    fun rejectsAMissingOrEmptyPayload() {
++        assertFalse(HidReportSupport.isSupportedSetReport(outputType, 0x03, null))
++        assertFalse(HidReportSupport.isSupportedSetReport(outputType, 0x00, null))
++        assertFalse(HidReportSupport.isSupportedSetReport(outputType, 0x03, ByteArray(0)))
++        assertFalse(HidReportSupport.isSupportedSetReport(outputType, 0x00, ByteArray(0)))
++    }
++
++    // ---- GET_REPORT ----
++
++    @Test
++    fun answersTheReportsTheAppProduces() {
++        assertEquals(HidGetReport.MOUSE_INPUT, HidReportSupport.supportedGetReport(inputType, 0x01))
++        assertEquals(HidGetReport.KEYBOARD_INPUT, HidReportSupport.supportedGetReport(inputType, 0x02))
++        assertEquals(HidGetReport.KEYBOARD_LED, HidReportSupport.supportedGetReport(outputType, 0x03))
++    }
++
++    @Test
++    fun rejectsUnsupportedGetReportTypes() {
++        assertNull(HidReportSupport.supportedGetReport(featureType, 0x03))
++        assertNull(HidReportSupport.supportedGetReport(featureType, 0x01))
++    }
++
++    @Test
++    fun rejectsUnsupportedGetReportIds() {
++        assertNull(HidReportSupport.supportedGetReport(inputType, 0x00))
++        assertNull(HidReportSupport.supportedGetReport(inputType, 0x03))
++        assertNull(HidReportSupport.supportedGetReport(outputType, 0x00))
++        assertNull(HidReportSupport.supportedGetReport(outputType, 0x01))
++    }
++}
+-- 
+2.49.0
+

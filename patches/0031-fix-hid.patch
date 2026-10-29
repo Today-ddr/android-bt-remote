@@ -1,0 +1,51 @@
+From 53b00d72698902e9e950fe6ae0472c6b1511125a Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 01:12:54 +0800
+Subject: [PATCH 31/33] =?UTF-8?q?fix(hid):=20=E4=BF=9D=E8=AF=81=E6=8A=A5?=
+ =?UTF-8?q?=E5=91=8A=E7=BC=93=E5=AD=98=E8=B7=A8=E7=BA=BF=E7=A8=8B=E5=8F=AF?=
+ =?UTF-8?q?=E8=A7=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- GET_REPORT 在 HID 回调线程读取最近报告，缓存字段改为 volatile
+- 应用注销时清空 LED 与报告缓存，避免向已消失的宿主返回旧状态
+---
+ .../btremote/data/bluetooth/BluetoothHidCore.kt     | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+index 8865824..5414263 100644
+--- a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
++++ b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+@@ -126,6 +126,10 @@ class BluetoothHidCore(
+         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
+             super.onAppStatusChanged(pluggedDevice, registered)
+             _isBluetoothHidProfileRegistered.value = registered
++            if (!registered) {
++                // An unregistered app has no host to keep LED state for.
++                clearReportCache()
++            }
+             if (registered &&
+                 isAppForeground &&
+                 isMacAddress(autoConnectDeviceAddress)
+@@ -261,8 +265,15 @@ class BluetoothHidCore(
+     private val _keyboardLedState: MutableStateFlow<KeyboardLedState> = MutableStateFlow(KeyboardLedState.EMPTY)
+     val keyboardLedState: StateFlow<KeyboardLedState> = _keyboardLedState
+ 
+-    /** Last reports sent to the host, so GET_REPORT has something current to answer with. */
++    /**
++     * Last reports sent to the host, so GET_REPORT has something current to answer with.
++     * Written from the caller that sends input and read from the HID callback
++     * thread, so the references have to be published across threads.
++     */
++    @Volatile
+     private var lastKeyboardReport: ByteArray = ByteArray(KEYBOARD_REPORT_SIZE)
++
++    @Volatile
+     private var lastMouseReport: ByteArray = ByteArray(MOUSE_REPORT_SIZE)
+ 
+     private fun clearReportCache() {
+-- 
+2.49.0
+
