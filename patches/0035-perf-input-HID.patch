@@ -1,0 +1,524 @@
+From a6b5de1411e1e50afa00e72f2310aa0dd2b09fe1 Mon Sep 17 00:00:00 2001
+From: Today <12380809+Today-ddr@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 12:04:23 +0800
+Subject: [PATCH 35/35] =?UTF-8?q?perf(input):=20=E4=B8=B2=E8=A1=8C?=
+ =?UTF-8?q?=E5=BC=82=E6=AD=A5=E5=8F=91=E9=80=81=20HID=20=E6=8A=A5=E5=91=8A?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将高频键盘和触控板报告移出主线程，避免同步 Binder 调用阻塞界面
+使用单线程 FIFO 并合并连续鼠标移动，保证按键、点击和滚动顺序
+关闭时排空已入队报告，补充顺序、合并和关闭行为测试
+---
+ .../data/bluetooth/BluetoothHidCore.kt        |   7 +
+ .../entities/remoteInput/HidReportSender.kt   | 211 ++++++++++++++++++
+ .../presentation/viewmodel/RemoteViewModel.kt |  35 ++-
+ .../remoteInput/HidReportSenderTest.kt        | 189 ++++++++++++++++
+ 4 files changed, 434 insertions(+), 8 deletions(-)
+ create mode 100644 app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/HidReportSender.kt
+ create mode 100644 app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/HidReportSenderTest.kt
+
+diff --git a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+index 57ada63..117253e 100644
+--- a/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
++++ b/app/src/main/java/com/atharok/btremote/data/bluetooth/BluetoothHidCore.kt
+@@ -28,6 +28,11 @@ class BluetoothHidCore(
+     private val adapter: BluetoothAdapter?,
+     private val hidSettings: BluetoothHidDeviceAppSdpSettings
+ ) {
++    /**
++     * Written on the main thread, read from the HID report sender thread, so
++     * the reference has to be published across threads.
++     */
++    @Volatile
+     private var bluetoothHidDevice: BluetoothHidDevice? = null
+ 
+     private val _isBluetoothServiceRunning: MutableStateFlow<Boolean> = MutableStateFlow(false)
+@@ -232,6 +237,8 @@ class BluetoothHidCore(
+ 
+     // ---- Device Connection ----
+ 
++    /** Written on the main thread and read from the report sender thread. */
++    @Volatile
+     private var bluetoothDevice: BluetoothDevice? = null
+ 
+     fun connectDevice(deviceAddress: String): Boolean {
+diff --git a/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/HidReportSender.kt b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/HidReportSender.kt
+new file mode 100644
+index 0000000..598a92d
+--- /dev/null
++++ b/app/src/main/java/com/atharok/btremote/domain/entities/remoteInput/HidReportSender.kt
+@@ -0,0 +1,211 @@
++package com.atharok.btremote.domain.entities.remoteInput
++
++import com.atharok.btremote.common.utils.KEYBOARD_REPORT_ID
++import com.atharok.btremote.common.utils.MOUSE_REPORT_ID
++import java.util.concurrent.ExecutorService
++import java.util.concurrent.Executors
++import java.util.concurrent.RejectedExecutionException
++import kotlin.math.abs
++
++/** The largest delta one HID mouse report can carry (a signed byte). */
++private const val MAX_MOUSE_DELTA = 127
++
++/**
++ * Runs tasks one at a time, in the order they were submitted.
++ *
++ * Kept as an interface so [HidReportSender] stays a plain JVM class: tests can
++ * drive the queue by hand instead of waiting on a thread.
++ */
++interface HidReportExecutor {
++
++    fun execute(task: Runnable)
++
++    /**
++     * Stops accepting new tasks. Tasks already submitted still run, which is
++     * what keeps a release report queued before shutdown from being dropped.
++     */
++    fun shutdown()
++}
++
++/** The production executor: a single background thread, no parallelism. */
++class SingleThreadHidReportExecutor(
++    threadName: String = "hid-report-sender"
++) : HidReportExecutor {
++
++    private val executor: ExecutorService = Executors.newSingleThreadExecutor { task ->
++        Thread(task, threadName).apply { isDaemon = true }
++    }
++
++    override fun execute(task: Runnable) = executor.execute(task)
++
++    override fun shutdown() = executor.shutdown()
++}
++
++/**
++ * Serialises every report the UI produces onto one ordered queue.
++ *
++ * `BluetoothHidDevice.sendReport` is a synchronous Binder call, and the
++ * trackpad produces pointer events far faster than a BLE link can
++ * carry them. Sending from the UI thread therefore stalls frame production,
++ * which is what made the input page stutter; reports are now queued here and
++ * written by [executor] off the main thread instead.
++ *
++ * Ordering is the whole point, so the queue is strictly FIFO and only the
++ * worker thread ever calls [sendReport]: a key press must reach the host before
++ * its release, and a click's press before its release. The single exception is
++ * merging two adjacent pointer movements, which the host cannot observe as
++ * separate events anyway and which keeps high-frequency drags from filling the
++ * BLE queue. A movement is only ever merged with the report directly before it,
++ * so it can never overtake a key, click or scroll, which all break the run.
++ */
++class HidReportSender(
++    private val sendReport: (id: Int, bytes: ByteArray) -> Boolean,
++    private val executor: HidReportExecutor
++) {
++
++    private val lock = Any()
++    private val pending = ArrayDeque<PendingReport>()
++    private var isRunning = false
++
++    fun sendKeyboardReport(bytes: ByteArray) {
++        enqueue(PendingReport.Keyboard(bytes.copyOf()))
++    }
++
++    /**
++     * Queues one mouse report. The kind is inferred from what the report
++     * changes: a zero delta is a button transition (press, release, drag start
++     * or end), a non-zero wheel is a scroll, and anything else is movement.
++     * Only movement may be merged with the movement before it.
++     *
++     * Deltas are clamped here, exactly as a single report was before it was
++     * queued, so merging can only ever combine values that a report could
++     * already carry.
++     */
++    fun sendMouseReport(buttons: Byte, dx: Int, dy: Int, wheel: Int) {
++        val deltaX = dx.coerceIn(-MAX_MOUSE_DELTA, MAX_MOUSE_DELTA)
++        val deltaY = dy.coerceIn(-MAX_MOUSE_DELTA, MAX_MOUSE_DELTA)
++        val wheelDelta = wheel.coerceIn(-MAX_MOUSE_DELTA, MAX_MOUSE_DELTA)
++        val report = when {
++            wheelDelta != 0 -> PendingReport.Scroll(buttons, wheelDelta)
++            deltaX == 0 && deltaY == 0 -> PendingReport.Buttons(buttons)
++            else -> PendingReport.Move(buttons, deltaX, deltaY)
++        }
++        enqueue(report)
++    }
++
++    /**
++     * Stops the worker once the queue is empty. Reports already queued - in
++     * particular the release reports produced while the input page tears down -
++     * are still sent; nothing is discarded here.
++     */
++    fun close() {
++        executor.shutdown()
++    }
++
++    private fun enqueue(report: PendingReport) {
++        synchronized(lock) {
++            val tail = pending.lastOrNull()
++            if (tail is PendingReport.Move &&
++                report is PendingReport.Move &&
++                tail.buttons == report.buttons &&
++                canMerge(tail, report)
++            ) {
++                pending.removeLastOrNull()
++                pending.addLast(
++                    PendingReport.Move(
++                        buttons = tail.buttons,
++                        dx = tail.dx + report.dx,
++                        dy = tail.dy + report.dy
++                    )
++                )
++            } else {
++                pending.addLast(report)
++            }
++        }
++        scheduleDrain()
++    }
++
++    /**
++     * A merged delta has to stay inside one report's signed byte, otherwise the
++     * extra motion would be clamped away and the pointer would visibly stall.
++     */
++    private fun canMerge(first: PendingReport.Move, second: PendingReport.Move): Boolean =
++        abs(first.dx + second.dx) <= MAX_MOUSE_DELTA &&
++            abs(first.dy + second.dy) <= MAX_MOUSE_DELTA
++
++    private fun scheduleDrain() {
++        val start = synchronized(lock) {
++            if (isRunning) {
++                false
++            } else {
++                isRunning = true
++                true
++            }
++        }
++        if (!start) return
++
++        try {
++            executor.execute { drain() }
++        } catch (_: RejectedExecutionException) {
++            // close() shut the executor down before this task could be queued.
++            // Finish the queue here so a late release report is still sent
++            // instead of leaving a key or button held on the host.
++            drain()
++        }
++    }
++
++    private fun drain() {
++        while (true) {
++            val report = synchronized(lock) {
++                pending.removeFirstOrNull() ?: run {
++                    isRunning = false
++                    null
++                }
++            } ?: return
++
++            try {
++                sendReport(report.id, report.toBytes())
++            } catch (failure: Throwable) {
++                // Release the worker flag so the next enqueue can start a new
++                // drain, then surface the failure the way a synchronous send
++                // would have.
++                synchronized(lock) { isRunning = false }
++                throw failure
++            }
++        }
++    }
++}
++
++private sealed interface PendingReport {
++
++    val id: Int
++
++    fun toBytes(): ByteArray
++
++    class Keyboard(private val bytes: ByteArray) : PendingReport {
++        override val id: Int get() = KEYBOARD_REPORT_ID
++        override fun toBytes(): ByteArray = bytes
++    }
++
++    data class Move(
++        val buttons: Byte,
++        val dx: Int,
++        val dy: Int
++    ) : PendingReport {
++        override val id: Int get() = MOUSE_REPORT_ID
++        override fun toBytes(): ByteArray = mouseReportBytes(buttons, dx, dy, 0)
++    }
++
++    data class Buttons(val buttons: Byte) : PendingReport {
++        override val id: Int get() = MOUSE_REPORT_ID
++        override fun toBytes(): ByteArray = mouseReportBytes(buttons, 0, 0, 0)
++    }
++
++    data class Scroll(val buttons: Byte, val wheel: Int) : PendingReport {
++        override val id: Int get() = MOUSE_REPORT_ID
++        override fun toBytes(): ByteArray = mouseReportBytes(buttons, 0, 0, wheel)
++    }
++}
++
++private fun mouseReportBytes(buttons: Byte, dx: Int, dy: Int, wheel: Int): ByteArray =
++    byteArrayOf(buttons, dx.toByte(), dy.toByte(), wheel.toByte())
+diff --git a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
+index 1a0e504..7a23f7c 100644
+--- a/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
++++ b/app/src/main/java/com/atharok/btremote/presentation/viewmodel/RemoteViewModel.kt
+@@ -2,9 +2,9 @@ package com.atharok.btremote.presentation.viewmodel
+ 
+ import androidx.lifecycle.ViewModel
+ import androidx.lifecycle.viewModelScope
+-import com.atharok.btremote.common.utils.KEYBOARD_REPORT_ID
+-import com.atharok.btremote.common.utils.MOUSE_REPORT_ID
++import com.atharok.btremote.domain.entities.remoteInput.HidReportSender
+ import com.atharok.btremote.domain.entities.remoteInput.MouseButtons
++import com.atharok.btremote.domain.entities.remoteInput.SingleThreadHidReportExecutor
+ import com.atharok.btremote.domain.entities.remoteInput.keyboard.KeyboardLedState
+ import com.atharok.btremote.domain.entities.remoteInput.trackpad.TrackpadGestureAction
+ import com.atharok.btremote.domain.entities.settings.HapticIntensity
+@@ -22,6 +22,16 @@ class RemoteViewModel(
+     private val useCase: RemoteUseCase
+ ): ViewModel() {
+ 
++    /**
++     * Every report produced by the on-screen keyboard and trackpad goes through
++     * this one ordered queue, so the Binder call behind `sendReport` no longer
++     * runs on the UI thread. See [HidReportSender] for the ordering rules.
++     */
++    private val hidReportSender = HidReportSender(
++        sendReport = useCase::sendReport,
++        executor = SingleThreadHidReportExecutor()
++    )
++
+     // ---- Settings ----
+ 
+     val remoteSettingsFlow: Flow<RemoteSettings> = useCase.remoteSettingsFlow
+@@ -123,14 +133,23 @@ class RemoteViewModel(
+ 
+     // Mouse
+     val sendMouseReport: (MouseButtons, Float, Float, Float) -> Unit = { buttons, x, y, wheel ->
+-        val xInt = x.roundToInt().coerceIn(-127, 127)
+-        val yInt = y.roundToInt().coerceIn(-127, 127)
+-        val wheelInt = wheel.roundToInt().coerceIn(-127, 127)
+-        val bytes: ByteArray = byteArrayOf(buttons.value, xInt.toByte(), yInt.toByte(), wheelInt.toByte())
+-        sendReport(MOUSE_REPORT_ID, bytes)
++        hidReportSender.sendMouseReport(
++            buttons = buttons.value,
++            dx = x.roundToInt(),
++            dy = y.roundToInt(),
++            wheel = wheel.roundToInt()
++        )
+     }
+ 
+     // Keyboard
+-    val sendKeyboardReport: (ByteArray) -> Unit = { bytes -> sendReport(KEYBOARD_REPORT_ID, bytes) }
++    val sendKeyboardReport: (ByteArray) -> Unit = { bytes ->
++        hidReportSender.sendKeyboardReport(bytes)
++    }
++
++    override fun onCleared() {
++        // The page releases held keys and buttons while it tears down; those
++        // reports are already queued and must still reach the host.
++        hidReportSender.close()
++    }
+ 
+ }
+diff --git a/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/HidReportSenderTest.kt b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/HidReportSenderTest.kt
+new file mode 100644
+index 0000000..1233838
+--- /dev/null
++++ b/app/src/test/java/com/atharok/btremote/domain/entities/remoteInput/HidReportSenderTest.kt
+@@ -0,0 +1,189 @@
++package com.atharok.btremote.domain.entities.remoteInput
++
++import com.atharok.btremote.common.utils.KEYBOARD_REPORT_ID
++import com.atharok.btremote.common.utils.MOUSE_REPORT_ID
++import org.junit.Assert.assertArrayEquals
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.util.concurrent.RejectedExecutionException
++
++class HidReportSenderTest {
++
++    private val executor = ManualExecutor()
++    private val sent = mutableListOf<SentReport>()
++    private val sender = HidReportSender(
++        sendReport = { id, bytes ->
++            sent += SentReport(id, bytes)
++            true
++        },
++        executor = executor
++    )
++
++    @Test
++    fun keyboardAndClickReportsKeepSubmissionOrder() {
++        val press = keyboardReport(0x04)
++        val release = keyboardReport(0x00)
++
++        sender.sendKeyboardReport(press)
++        sender.sendMouseReport(buttons = LEFT, dx = 0, dy = 0, wheel = 0)
++        sender.sendKeyboardReport(release)
++        sender.sendMouseReport(buttons = NONE, dx = 0, dy = 0, wheel = 0)
++
++        executor.runAll()
++
++        assertEquals(4, sent.size)
++        assertKeyboard(sent[0], press)
++        assertMouse(sent[1], buttons = LEFT, dx = 0, dy = 0, wheel = 0)
++        assertKeyboard(sent[2], release)
++        assertMouse(sent[3], buttons = NONE, dx = 0, dy = 0, wheel = 0)
++    }
++
++    @Test
++    fun adjacentMovesMergeIntoOneReport() {
++        sender.sendMouseReport(buttons = NONE, dx = 3, dy = 4, wheel = 0)
++        sender.sendMouseReport(buttons = NONE, dx = -1, dy = 2, wheel = 0)
++        sender.sendMouseReport(buttons = NONE, dx = 5, dy = 0, wheel = 0)
++
++        executor.runAll()
++
++        assertEquals(1, sent.size)
++        assertMouse(sent[0], buttons = NONE, dx = 7, dy = 6, wheel = 0)
++    }
++
++    @Test
++    fun movesAreNotMergedAcrossAClick() {
++        sender.sendMouseReport(buttons = NONE, dx = 10, dy = 0, wheel = 0)
++        sender.sendMouseReport(buttons = LEFT, dx = 0, dy = 0, wheel = 0)
++        sender.sendMouseReport(buttons = LEFT, dx = 4, dy = 0, wheel = 0)
++        sender.sendMouseReport(buttons = NONE, dx = 0, dy = 0, wheel = 0)
++        sender.sendMouseReport(buttons = NONE, dx = 7, dy = 0, wheel = 0)
++
++        executor.runAll()
++
++        assertEquals(5, sent.size)
++        assertMouse(sent[0], buttons = NONE, dx = 10, dy = 0, wheel = 0)
++        assertMouse(sent[1], buttons = LEFT, dx = 0, dy = 0, wheel = 0)
++        assertMouse(sent[2], buttons = LEFT, dx = 4, dy = 0, wheel = 0)
++        assertMouse(sent[3], buttons = NONE, dx = 0, dy = 0, wheel = 0)
++        assertMouse(sent[4], buttons = NONE, dx = 7, dy = 0, wheel = 0)
++    }
++
++    @Test
++    fun scrollAndKeyboardBreakMovementMerging() {
++        sender.sendMouseReport(buttons = NONE, dx = 2, dy = 0, wheel = 0)
++        sender.sendMouseReport(buttons = NONE, dx = 0, dy = 0, wheel = 3)
++        sender.sendMouseReport(buttons = NONE, dx = 5, dy = 0, wheel = 0)
++        sender.sendKeyboardReport(keyboardReport(0x04))
++        sender.sendMouseReport(buttons = NONE, dx = 6, dy = 0, wheel = 0)
++
++        executor.runAll()
++
++        assertEquals(5, sent.size)
++        assertMouse(sent[0], buttons = NONE, dx = 2, dy = 0, wheel = 0)
++        assertMouse(sent[1], buttons = NONE, dx = 0, dy = 0, wheel = 3)
++        assertMouse(sent[2], buttons = NONE, dx = 5, dy = 0, wheel = 0)
++        assertEquals(KEYBOARD_REPORT_ID, sent[3].id)
++        assertMouse(sent[4], buttons = NONE, dx = 6, dy = 0, wheel = 0)
++    }
++
++    @Test
++    fun movesThatWouldOverflowOneReportAreNotMerged() {
++        sender.sendMouseReport(buttons = NONE, dx = 100, dy = 0, wheel = 0)
++        sender.sendMouseReport(buttons = NONE, dx = 60, dy = 0, wheel = 0)
++
++        executor.runAll()
++
++        // Clamping the sum to 127 would silently drop motion, so the second
++        // movement stays a report of its own.
++        assertEquals(2, sent.size)
++        assertMouse(sent[0], buttons = NONE, dx = 100, dy = 0, wheel = 0)
++        assertMouse(sent[1], buttons = NONE, dx = 60, dy = 0, wheel = 0)
++    }
++
++    @Test
++    fun oversizedDeltaIsClampedToOneReport() {
++        sender.sendMouseReport(buttons = NONE, dx = 300, dy = -300, wheel = 0)
++
++        executor.runAll()
++
++        assertEquals(1, sent.size)
++        assertMouse(sent[0], buttons = NONE, dx = 127, dy = -127, wheel = 0)
++    }
++
++    @Test
++    fun closingTheSenderStillDrainsQueuedReports() {
++        sender.sendMouseReport(buttons = LEFT, dx = 0, dy = 0, wheel = 0)
++        sender.sendKeyboardReport(keyboardReport(0x00))
++
++        sender.close()
++        executor.runAll()
++
++        assertEquals(2, sent.size)
++        assertMouse(sent[0], buttons = LEFT, dx = 0, dy = 0, wheel = 0)
++        assertKeyboard(sent[1], keyboardReport(0x00))
++    }
++
++    @Test
++    fun releaseQueuedAfterCloseIsStillSent() {
++        sender.close()
++
++        sender.sendKeyboardReport(keyboardReport(0x00))
++
++        // The executor refuses new work once closed, so the sender had to
++        // finish the queue on the calling thread instead of dropping it.
++        assertEquals(1, sent.size)
++        assertKeyboard(sent[0], keyboardReport(0x00))
++        assertTrue(executor.hasNoQueuedWork())
++    }
++
++    private fun assertKeyboard(report: SentReport, expected: ByteArray) {
++        assertEquals(KEYBOARD_REPORT_ID, report.id)
++        assertArrayEquals(expected, report.bytes)
++    }
++
++    private fun assertMouse(report: SentReport, buttons: Byte, dx: Int, dy: Int, wheel: Int) {
++        assertEquals(MOUSE_REPORT_ID, report.id)
++        assertArrayEquals(
++            byteArrayOf(buttons, dx.toByte(), dy.toByte(), wheel.toByte()),
++            report.bytes
++        )
++    }
++
++    private fun keyboardReport(key: Int): ByteArray =
++        byteArrayOf(0, 0, key.toByte(), 0, 0, 0, 0, 0)
++
++    private data class SentReport(val id: Int, val bytes: ByteArray)
++
++    /**
++     * Runs work only when the test asks for it, so the queue can be inspected
++     * before the worker sees it.
++     */
++    private class ManualExecutor : HidReportExecutor {
++
++        private val tasks = ArrayDeque<Runnable>()
++        private var isShutdown = false
++
++        override fun execute(task: Runnable) {
++            if (isShutdown) throw RejectedExecutionException("closed")
++            tasks.addLast(task)
++        }
++
++        override fun shutdown() {
++            isShutdown = true
++        }
++
++        fun runAll() {
++            while (tasks.isNotEmpty()) {
++                tasks.removeFirst().run()
++            }
++        }
++
++        fun hasNoQueuedWork(): Boolean = tasks.isEmpty()
++    }
++
++    private companion object {
++        const val NONE: Byte = 0
++        const val LEFT: Byte = 1
++    }
++}
+-- 
+2.49.0
+
